@@ -1,0 +1,42 @@
+# --- Python Basics ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Virtual Environments ---
+# Poetry con "in-project: true" crea .venv qui
+.venv/
+env/
+venv/
+ENV/
+
+# --- Distribution / Build ---
+build/
+dist/
+*.egg-info/
+
+# --- Testing & Coverage ---
+.coverage
+htmlcov/
+.pytest_cache/
+
+# --- Project Specifics ---
+# Database SQLite (NON committare la cronologia chat locale!)
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# --- IDE & OS ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# --- Docker ---
+# Ignoriamo eventuali volumi locali mappati se dovessi crearli
+docker-data/
+
