@@ -17,7 +17,7 @@ class NodeState:
     # Mapping vector clocks to each room
     room_clocks: Dict[str, VectorClock]
 
-    def join_room(self, room_id: str):
+    def join_room(self, room_id: str) -> None:
         """Joins a node to the specified room"""
         if room_id not in self.room_clocks:
             self.room_clocks[room_id] = {self.node_id: 0}

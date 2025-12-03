@@ -3,11 +3,12 @@ Defines storage management APIs, using SQLite, for
 nodes' local persistence.
 """
 
-import sqlite3
 import json
+import sqlite3
 import time
-from typing import List
 from contextlib import contextmanager
+from typing import Iterator, List
+
 from src.core.message import Message
 
 
@@ -19,7 +20,7 @@ class StorageService:
         self._init_db()
 
     @contextmanager
-    def _get_conn(self):
+    def _get_conn(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_name)
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.row_factory = sqlite3.Row
@@ -28,7 +29,7 @@ class StorageService:
         finally:
             conn.close()
 
-    def _init_db(self):
+    def _init_db(self) -> None:
         with self._get_conn() as conn:
             cursor = conn.cursor()
 
@@ -69,7 +70,7 @@ class StorageService:
             cursor.execute("SELECT 1 FROM messages WHERE message_id = ?", (message_id,))
             return cursor.fetchone() is not None
 
-    def add_message(self, message: Message):
+    def add_message(self, message: Message) -> None:
         """
         Inserts a new message in the local storage.
         """
@@ -139,13 +140,15 @@ class StorageService:
         """Get all known peers in a room."""
         with self._get_conn() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT peer_url FROM room_peers WHERE room_id = ?", (room_id,))
+            cursor.execute(
+                "SELECT peer_url FROM room_peers WHERE room_id = ?", (room_id,)
+            )
 
             peers = [row["peer_url"] for row in cursor.fetchall()]
             conn.close()
             return peers
 
-    def add_peer(self, room_id: str, peer_url: str):
+    def add_peer(self, room_id: str, peer_url: str) -> None:
         """Add a new peer inside the specified room"""
         with self._get_conn() as conn:
             cursor = conn.cursor()
