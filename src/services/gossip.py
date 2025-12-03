@@ -17,9 +17,7 @@ logger = logging.getLogger(__name__)
 class GossipService:
     """Background sync service"""
 
-    def __init__(
-        self, storage: StorageService, node_id: str, node_addr: str, peers: list[str]
-    ):
+    def __init__(self, storage: StorageService, node_id: str, node_addr: str, peers: list[str]):
         self.storage = storage
         self.node_id = node_id
         self.node_addr = node_addr

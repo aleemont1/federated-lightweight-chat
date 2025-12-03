@@ -140,9 +140,7 @@ class StorageService:
         """Get all known peers in a room."""
         with self._get_conn() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT peer_url FROM room_peers WHERE room_id = ?", (room_id,)
-            )
+            cursor.execute("SELECT peer_url FROM room_peers WHERE room_id = ?", (room_id,))
 
             peers = [row["peer_url"] for row in cursor.fetchall()]
             conn.close()
