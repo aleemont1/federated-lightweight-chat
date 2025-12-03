@@ -1,3 +1,7 @@
+"""
+Define Message structure to ensure consinstency in the system
+"""
+
 import uuid
 import time
 from typing import Dict
