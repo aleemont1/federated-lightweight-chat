@@ -6,6 +6,7 @@ which are used to track causal relationships in distributed systems.
 """
 
 from enum import Enum
+
 from src.core.message import VectorClock
 
 

@@ -2,9 +2,10 @@
 Define Message structure to ensure consinstency in the system
 """
 
-import uuid
 import time
+import uuid
 from typing import Dict
+
 from pydantic import BaseModel, Field
 
 # Map (NodeID: Counter)
