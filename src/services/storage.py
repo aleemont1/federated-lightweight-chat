@@ -1,13 +1,18 @@
+"""
+Defines storage management APIs, using SQLite, for
+nodes' local persistence.
+"""
+
 import sqlite3
 import json
 import time
 from typing import List
 from contextlib import contextmanager
-from ..core.message import Message
+from src.core.message import Message
 
 
 class StorageService:
-    """Handles local storage in nodes for persistance."""
+    """Handles local storage in nodes for persistence."""
 
     def __init__(self, db_name: str):
         self.db_name = db_name
@@ -28,11 +33,11 @@ class StorageService:
             cursor = conn.cursor()
 
             cursor.execute(
-                """CREATE TABLE IF NOT EXISTS rooms (
+                """CREATE TABLE IF NOT EXISTS room_peers (
                     room_id TEXT,
                     peer_url TEXT,
                     last_seen REAL,
-                    PRIMARY KEY (room_id, peer_url)"""
+                    PRIMARY KEY (room_id, peer_url))"""
             )
 
             cursor.execute(
@@ -42,8 +47,7 @@ class StorageService:
                                 sender_id TEXT,
                                 content TEXT,
                                 vector_clock TEXT,
-                                created_at REAL,
-                                FOREIGN KEY(room_id) REFERENCES rooms(room_id))"""
+                                created_at REAL)"""
             )
 
             cursor.execute(
@@ -63,7 +67,7 @@ class StorageService:
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT 1 FROM messages WHERE message_id = ?", (message_id,))
-        return cursor.fetchone() is not None
+            return cursor.fetchone() is not None
 
     def add_message(self, message: Message):
         """
@@ -112,4 +116,45 @@ class StorageService:
                 messages.append(Message(**msg_dict))
 
                 conn.close()
-                return messages
+        return messages
+
+    def get_latest_clock(self, node_id: str) -> int:
+        """
+        Retreives the highest counter known for this node.
+        Useful to restore the clock at 0 at each restart.
+        """
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT vector_clock FROM messages")
+            rows = cursor.fetchall()
+
+            max_counter = 0
+            for row in rows:
+                vc = json.loads(row["vector_clock"])
+                max_counter = max(vc.get(node_id, 0), max_counter)
+            conn.close()
+        return max_counter
+
+    def get_peers(self, room_id: str) -> List[str]:
+        """Get all known peers in a room."""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT peer_url FROM room_peers WHERE room_id = ?", (room_id,))
+
+            peers = [row["peer_url"] for row in cursor.fetchall()]
+            conn.close()
+            return peers
+
+    def add_peer(self, room_id: str, peer_url: str):
+        """Add a new peer inside the specified room"""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT OR REPLACE INTO room_peers
+                              (room_id, peer_url, last_seen)
+                              VALUES (?, ?, ?)
+                           """,
+                (room_id, peer_url, time.time()),
+            )
+            conn.commit()
+            conn.close()
