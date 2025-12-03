@@ -7,12 +7,12 @@ import logging
 import random
 import httpx
 
-from src.core.message import Message
 from src.services.storage import StorageService
 
 logger = logging.getLogger(__name__)
 
 
+# pylint: disable=too-few-public-methods
 class GossipService:
     """Background sync service"""
 
@@ -36,8 +36,9 @@ class GossipService:
                 if self.peers:
                     # Choose a random peer to sync with
                     target = random.choice(self.peers)
-                    if target != self.my_addr:
+                    if target != self.node_addr:
                         await self._push_data(target)
+            # pylint: disable=broad-exception-caught
             except Exception as e:
                 logger.error("Gossip error: %s", e)
             await asyncio.sleep(2)
@@ -55,5 +56,6 @@ class GossipService:
                     await client.post(
                         f"{target}/replication", json=payload, headers={"X-Origin-Node": self.node_addr}
                     )
+                # pylint: disable=broad-exception-caught
                 except Exception:
                     pass
