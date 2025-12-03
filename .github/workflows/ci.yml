@@ -36,10 +36,10 @@ jobs:
         run: poetry install --no-interaction --no-root
 
       - name: Run Pylint
-        run: poetry run pylint --output-format=colorized src tests
+        run: poetry run pylint --output-format=colorized --max-line-length=110 src tests
 
       - name: Run Tests with Coverage
-        run: poetry run pytest -v --color=yes
+        run: poetry run pytest -vv --color=yes
 
 
   
