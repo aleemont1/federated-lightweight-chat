@@ -3,8 +3,9 @@
 # Disabling pylint warning as it is a false positive due to pytest fixtures.
 # pylint: disable=redefined-outer-name
 import pytest
-from src.services.storage import StorageService
+
 from src.core.message import Message
+from src.services.storage import StorageService
 
 
 @pytest.fixture
@@ -50,7 +51,12 @@ def test_get_latest_clock(storage_service):
     Test latest vector clock retreival
     """
     msg1 = Message(room_id="r", sender_id="s", content="1", vector_clock={"node_a": 10})
-    msg2 = Message(room_id="r", sender_id="s", content="2", vector_clock={"node_a": 25, "node_b": 10})
+    msg2 = Message(
+        room_id="r",
+        sender_id="s",
+        content="2",
+        vector_clock={"node_a": 25, "node_b": 10},
+    )
 
     storage_service.add_message(msg1)
     storage_service.add_message(msg2)
