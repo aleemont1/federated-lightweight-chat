@@ -1,7 +1,5 @@
 """Unit tests for NodeState class"""
 
-import pytest
-
 from src.core.node import NodeState
 
 
@@ -9,7 +7,7 @@ def test_node_init():
     """Test node state initialization"""
     node = NodeState(node_id="alice", room_clocks={})
     assert node.node_id == "alice"
-    assert node.room_clocks == {}
+    assert not node.room_clocks
 
 
 def test_join_new_room():
