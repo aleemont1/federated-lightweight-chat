@@ -57,7 +57,6 @@ class StorageService:
             )
 
             conn.commit()
-            conn.close()
 
     def message_exists(self, message_id: str) -> bool:
         """
@@ -93,7 +92,6 @@ class StorageService:
                 ),
             )
             conn.commit()
-            conn.close()
 
     def get_all_messages(self, limit: int = 100, offset: int = 0) -> List[Message]:
         """Retreives all messages and converts them to Pydantic objects"""
@@ -116,7 +114,6 @@ class StorageService:
                 msg_dict["vector_clock"] = json.loads(msg_dict["vector_clock"])
                 messages.append(Message(**msg_dict))
 
-                conn.close()
         return messages
 
     def get_latest_clock(self, node_id: str) -> int:
@@ -133,7 +130,6 @@ class StorageService:
             for row in rows:
                 vc = json.loads(row["vector_clock"])
                 max_counter = max(vc.get(node_id, 0), max_counter)
-            conn.close()
         return max_counter
 
     def get_peers(self, room_id: str) -> List[str]:
@@ -143,7 +139,6 @@ class StorageService:
             cursor.execute("SELECT peer_url FROM room_peers WHERE room_id = ?", (room_id,))
 
             peers = [row["peer_url"] for row in cursor.fetchall()]
-            conn.close()
             return peers
 
     def add_peer(self, room_id: str, peer_url: str) -> None:
@@ -157,5 +152,4 @@ class StorageService:
                            """,
                 (room_id, peer_url, time.time()),
             )
-            conn.commit()
             conn.close()
