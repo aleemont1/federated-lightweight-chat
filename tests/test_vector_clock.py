@@ -2,7 +2,7 @@
 Unit tests for the VectorClockService class
 """
 
-from src.core.vector_clock import VectorClockService, ClockRelation
+from src.core.vector_clock import ClockRelation, VectorClockService
 
 
 def test_increment_clock():

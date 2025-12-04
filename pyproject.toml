@@ -1,30 +1,70 @@
 [project]
 name = "federated-lightweight-chat"
 version = "0.1.0"
-description = "A simple distrbuted chat system, with rooms (topics) and minimal chatting features"
+description = "A simple distributed chat system, with rooms (topics) and minimal chatting features"
 authors = [
-    {name = "Alessandro Monticelli",email = "alessandr.monticell4@studio.unibo.it"}
+    {name = "Alessandro Monticelli", email = "alessandr.monticell4@studio.unibo.it"}
 ]
 license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.11"
+# Main runtime dependencies
 dependencies = [
     "fastapi (>=0.109.0)",
     "uvicorn[standard] (>=0.27.0)",
     "pydantic (>=2.6.0)",
     "httpx (>=0.26.0)",
-    "python-multipart (>=0.0.9)"
+    "python-multipart (>=0.0.9)",
+    "pydantic-settings (>=2.2.0)"
 ]
-
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
-[dependency-groups]
-dev = [
-    "pytest (>=9.0.1,<10.0.0)",
-    "pylint (>=4.0.4,<5.0.0)",
-    "watchdog (>=6.0.0,<7.0.0)",
-    "httpx (>=0.28.1,<0.29.0)"
+# --- DEVELOPMENT DEPENDENCIES ---
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+pytest-cov = "^4.1.0"
+pylint = "^3.0.0"
+black = "^24.0.0"
+isort = "^5.13.0"
+mypy = "^1.8.0"
+flake8 = "^7.0.0"
+bandit = "^1.7.0"
+httpx = "^0.26.0"
+watchdog = "^4.0.0" 
+
+# --- TOOL CONFIGURATION ---
+
+[tool.black]
+line-length = 110
+target-version = ['py311']
+
+[tool.isort]
+profile = "black"
+line_length = 110
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+disallow_untyped_defs = true
+
+[tool.pylint.messages_control]
+disable = [
+    "R0903", # Too few public methods (common in Pydantic models)
+    "E0401", # Import errors (let MyPy handle this)
 ]
+max-line-length = 110
+
+[tool.pylint.format]
+max-line-length = 110
+
+[tool.pytest.ini_options]
+pythonpath = "."
+testpaths = ["tests"]
+addopts = "--strict-markers"
+
+[tool.bandit]
+exclude_dirs = ["tests"]
