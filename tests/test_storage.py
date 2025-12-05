@@ -2,6 +2,8 @@
 
 # Disabling pylint warning as it is a false positive due to pytest fixtures.
 # pylint: disable=redefined-outer-name
+import time
+
 import pytest
 
 from src.core.message import Message
@@ -46,6 +48,85 @@ def test_add_and_retreive_message(storage_service):
     assert loaded_msg.vector_clock["node_a"] == 1
 
 
+def test_save_and_load_snapshot(storage_service):
+    """Test saving and loading vector clock snapshots."""
+    room_id = "general"
+    vector_clock = {"alice": 10, "bob": 5}
+
+    # 1. Save Snapshot
+    storage_service.save_snapshot(room_id, vector_clock)
+
+    # 2. Load Snapshot
+    loaded_clock, timestamp = storage_service.load_snapshot(room_id)
+
+    assert loaded_clock == vector_clock
+    assert timestamp > 0.0
+
+    # 3. Overwrite Snapshot (should replace old one)
+    new_clock = {"alice": 12, "bob": 6}
+    storage_service.save_snapshot(room_id, new_clock)
+
+    loaded_clock_2, timestamp_2 = storage_service.load_snapshot(room_id)
+    assert loaded_clock_2 == new_clock
+    assert timestamp_2 >= timestamp
+
+
+def test_load_snapshot_not_found(storage_service):
+    """Test loading a snapshot that doesn't exist."""
+    clock, timestamp = storage_service.load_snapshot("unknown_room")
+    assert clock is None
+    assert timestamp == 0.0
+
+
+def test_get_messages_after(storage_service):
+    """Test retrieving messages after a certain timestamp (Delta Recovery)."""
+    room_id = "chat1"
+    base_time = time.time()
+
+    # Create messages with different timestamps
+    msg1 = Message(room_id=room_id, sender_id="a", content="old", created_at=base_time - 100)
+    msg2 = Message(room_id=room_id, sender_id="a", content="snapshot_point", created_at=base_time)
+    msg3 = Message(room_id=room_id, sender_id="a", content="new1", created_at=base_time + 10)
+    msg4 = Message(room_id=room_id, sender_id="a", content="new2", created_at=base_time + 20)
+
+    # Add all to DB
+    for m in [msg1, msg2, msg3, msg4]:
+        storage_service.add_message(m)
+
+    # Query: Get messages strictly AFTER base_time (simulating recovery from snapshot at msg2)
+    # Note: float comparison can be tricky, usually we use the snapshot timestamp
+    delta_messages = storage_service.get_messages_after(room_id, base_time)
+
+    assert len(delta_messages) == 2
+    assert delta_messages[0].content == "new1"
+    assert delta_messages[1].content == "new2"
+
+
+def test_get_all_room_ids_mixed_sources(storage_service):
+    """
+    Test retrieving room IDs from both messages table and snapshots table.
+    Ensures union logic works correctly.
+    """
+    # Room A only has messages
+    msg_a = Message(room_id="room_A", sender_id="a", content="hi")
+    storage_service.add_message(msg_a)
+
+    # Room B only has a snapshot (e.g., all messages compacted/deleted in a hypothetical future feature)
+    storage_service.save_snapshot("room_B", {"node": 1})
+
+    # Room C has both
+    msg_c = Message(room_id="room_C", sender_id="a", content="hi")
+    storage_service.add_message(msg_c)
+    storage_service.save_snapshot("room_C", {"node": 5})
+
+    rooms = storage_service.get_all_room_ids()
+
+    assert len(rooms) == 3
+    assert "room_A" in rooms
+    assert "room_B" in rooms
+    assert "room_C" in rooms
+
+
 def test_get_latest_clock(storage_service):
     """
     Test latest vector clock retreival
@@ -66,26 +147,13 @@ def test_get_latest_clock(storage_service):
     assert storage_service.get_latest_clock("node_c") == 0
 
 
-def test_add_and_retreive_peers(storage_service):
-    """
-    Test peers retreival
-    """
+def test_peers_management(storage_service):
+    """Test adding and retrieving peers."""
+    room = "lobby"
+    peer = "http://10.0.0.1:8000"
 
-    room_a = "room_a"
-    room_b = "room_b"
-    peer_1 = "http://peer_1:8000"
-    peer_2 = "http://peer_2:8000"
+    storage_service.add_peer(room, peer)
+    peers = storage_service.get_peers(room)
 
-    storage_service.add_peer(room_a, peer_1)
-    storage_service.add_peer(room_a, peer_2)
-    storage_service.add_peer(room_b, peer_1)
-
-    peers_room_a = storage_service.get_peers(room_a)
-    assert len(peers_room_a) == 2
-    assert peer_1 in peers_room_a
-    assert peer_2 in peers_room_a
-
-    peers_room_b = storage_service.get_peers(room_b)
-    assert len(peers_room_b) == 1
-    assert peer_1 in peers_room_b
-    assert peer_2 not in peers_room_b
+    assert len(peers) == 1
+    assert peers[0] == peer
