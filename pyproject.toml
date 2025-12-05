@@ -67,5 +67,10 @@ pythonpath = "."
 testpaths = ["tests"]
 addopts = "--strict-markers"
 
+[tool.coverage.report]
+exclude_lines = [
+    "@(abc\\.)?abstractmethod",
+]
+
 [tool.bandit]
 exclude_dirs = ["tests"]

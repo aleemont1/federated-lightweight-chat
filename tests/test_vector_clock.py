@@ -35,6 +35,15 @@ def test_merge_clocks():
     assert merged == expected
 
 
+def test_causality_equal():
+    """Test A <-> B relationship."""
+    c1 = {"node_a": 1, "node_b": 1}
+    c2 = {"node_a": 1, "node_b": 1}
+
+    relation = VectorClockService.compare(c1, c2)
+    assert relation == ClockRelation.EQUAL
+
+
 def test_causality_happened_before():
     """Test A -> B relationship."""
     c1 = {"node_a": 1, "node_b": 1}
@@ -42,6 +51,15 @@ def test_causality_happened_before():
 
     relation = VectorClockService.compare(c1, c2)
     assert relation == ClockRelation.BEFORE
+
+
+def test_causality_happened_after():
+    """Test A <- B relationship."""
+    c1 = {"node_a": 2, "node_b": 1}  # c1 knows everything c2 knows + more
+    c2 = {"node_a": 1, "node_b": 1}
+
+    relation = VectorClockService.compare(c1, c2)
+    assert relation == ClockRelation.AFTER
 
 
 def test_causality_concurrent():
