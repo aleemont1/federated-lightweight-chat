@@ -44,6 +44,14 @@ class GossipService:
                 logger.error("Gossip error: %s", e)
             await asyncio.sleep(2)
 
+    def stop(self) -> None:
+        """
+        Signals the gossip loop to stop running.
+        The loop will check this flag and exit gracefully.
+        """
+        logger.info("[%s] Stopping gossip service...", self.node_id)
+        self._running = False
+
     async def _push_data(self, target: str) -> None:
         """Push data to a target node"""
         msgs = self.storage.get_all_messages()
