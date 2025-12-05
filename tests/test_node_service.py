@@ -3,6 +3,9 @@ Unit tests for the NodeService.
 Tests lifecycle management, state recovery, and interaction with sub-services.
 """
 
+# pylint: disable=redefined-outer-name
+# pylint: disable=unused-argument
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,41 +16,46 @@ from src.services.node import LocalNodeService
 # Fixture to provide a fresh instance of the service for each test
 @pytest.fixture
 def node_service():
+    """Fixture that provides a fresh LocalNodeService instance."""
     return LocalNodeService()
 
 
 # Helper to mock dependencies consistently and fix the Async/Sync mismatch
 @pytest.fixture
 def mock_dependencies():
-    # FIXED: Path changed to 'src.services.node' matching your actual filename.
+    """
+    Fixture that mocks StorageService, GossipService, and settings.
+    Configures the GossipService.start method to be an AsyncMock.
+    """
     with (
-        patch("src.services.node.StorageService") as MockStorage,
-        patch("src.services.node.GossipService") as MockGossip,
-        patch("src.services.node.settings") as MockSettings,
+        patch("src.services.node.StorageService") as mock_storage_cls,
+        patch("src.services.node.GossipService") as mock_gossip_cls,
+        patch("src.services.node.settings"),
     ):
 
         # --- Configure Gossip Mock ---
-        mock_gossip_instance = MockGossip.return_value
+        mock_gossip_instance = mock_gossip_cls.return_value
 
+        # This satisfies asyncio.create_task(self._gossip.start())
         mock_gossip_instance.start = AsyncMock()
 
         # 'stop' is synchronous, so a standard MagicMock is fine.
         mock_gossip_instance.stop = MagicMock()
 
         # --- Configure Storage Mock ---
-        mock_storage_instance = MockStorage.return_value
+        mock_storage_instance = mock_storage_cls.return_value
         # Default behavior: empty rooms to avoid iteration errors
         mock_storage_instance.get_all_room_ids.return_value = []
 
         # Return the mocks so tests can customize return values
-        yield MockStorage, MockGossip, MockSettings
+        yield mock_storage_cls, mock_gossip_cls
 
 
 @pytest.mark.asyncio
 async def test_initialize_success(node_service, mock_dependencies):
     """Test successful initialization flow."""
-    MockStorage, MockGossip, _ = mock_dependencies
-    gossip_instance = MockGossip.return_value
+    _, mock_gossip_cls = mock_dependencies
+    gossip_instance = mock_gossip_cls.return_value
 
     await node_service.initialize("test_user")
 
@@ -55,7 +63,7 @@ async def test_initialize_success(node_service, mock_dependencies):
     assert node_service.state.node_id == "test_user"
 
     # Verify Gossip started correctly
-    MockGossip.assert_called_once()
+    mock_gossip_cls.assert_called_once()
     gossip_instance.start.assert_called_once()
 
 
@@ -77,13 +85,18 @@ async def test_initialize_idempotency_and_conflict(node_service, mock_dependenci
 @pytest.mark.asyncio
 async def test_state_recovery_snapshot_and_delta(node_service, mock_dependencies):
     """Test the 'Smart Recovery' logic with Snapshot + Delta."""
-    MockStorage, _, _ = mock_dependencies
-    storage_instance = MockStorage.return_value
+    mock_storage_cls, _ = mock_dependencies
+    storage_instance = mock_storage_cls.return_value
 
     # Setup Data for Recovery
+    # 1. Simulate finding a room "lobby"
     storage_instance.get_all_room_ids.return_value = ["lobby"]
+
+    # 2. Simulate loading a snapshot for that room
+    # Returns (VectorClock, timestamp)
     storage_instance.load_snapshot.return_value = ({"alice": 10, "bob": 5}, 100.0)
 
+    # 3. Simulate finding new messages after the snapshot (Delta)
     mock_msg = MagicMock()
     mock_msg.vector_clock = {"alice": 11, "bob": 5}
     storage_instance.get_messages_after.return_value = [mock_msg]
@@ -105,9 +118,9 @@ async def test_state_recovery_snapshot_and_delta(node_service, mock_dependencies
 @pytest.mark.asyncio
 async def test_shutdown_lifecycle(node_service, mock_dependencies):
     """Test graceful shutdown."""
-    MockStorage, MockGossip, _ = mock_dependencies
-    gossip_instance = MockGossip.return_value
-    storage_instance = MockStorage.return_value
+    mock_storage_cls, mock_gossip_cls = mock_dependencies
+    gossip_instance = mock_gossip_cls.return_value
+    storage_instance = mock_storage_cls.return_value
 
     # Init first to set up state
     await node_service.initialize("user1")

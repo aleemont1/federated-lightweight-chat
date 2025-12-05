@@ -7,6 +7,8 @@ import pytest
 from src.core.auth_models import LoginRequest
 from src.services.auth import DummyAuthProvider
 
+# pylint: disable=redefined-outer-name
+
 
 @pytest.fixture
 def auth_provider() -> DummyAuthProvider:
