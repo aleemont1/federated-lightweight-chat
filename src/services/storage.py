@@ -185,6 +185,44 @@ class StorageService:
 
         return messages
 
+    def get_messages_after(self, room_id: str, timestamp: float) -> List[Message]:
+        """
+        Retrieves messages for a room that arrived AFTER a specific timestamp.
+        Used to replay the 'delta' after the last snapshot
+        """
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM messages
+                    WHERE room_id = ? AND created_at > ?
+                    ORDER BY created_at ASC
+                """,
+                (room_id, timestamp),
+            )
+
+            rows = cursor.fetchall()
+            messages = []
+            for row in rows:
+                msg_dict = dict(row)
+                msg_dict["vector_clock"] = json.loads(msg_dict["vector_clock"])
+                messages.append(Message(**msg_dict))
+
+            return messages
+
+    def get_all_room_ids(self) -> List[str]:
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT room_id FROM messages
+                UNION
+                SELECT room_id FROM snapshots
+                """
+            )
+
+            return [row["room_id"] for row in cursor.fetchall()]
+
     def get_latest_clock(self, node_id: str) -> int:
         """
         Retreives the highest counter known for this node.
@@ -232,4 +270,4 @@ class StorageService:
                 """,
                 (room_id, peer_url, time.time()),
             )
-            conn.close()
+            conn.commit()
