@@ -150,8 +150,8 @@ class StorageService:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT vector_clock, last_processed_time 
-                    FROM snapshots 
+                SELECT vector_clock, last_processed_time
+                    FROM snapshots
                     WHERE room_id = ?
                 """,
                 (room_id,),
@@ -249,7 +249,7 @@ class StorageService:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT peer_url FROM room_peers 
+                SELECT peer_url FROM room_peers
                     WHERE room_id = ?
                 """,
                 (room_id,),
