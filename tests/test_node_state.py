@@ -1,6 +1,6 @@
 """Unit tests for NodeState class"""
 
-from src.core.node import NodeState
+from src.core.node_state import NodeState
 
 
 def test_node_init():
