@@ -7,9 +7,9 @@ import json
 import sqlite3
 import time
 from contextlib import contextmanager
-from typing import Iterator, List
+from typing import Iterator, List, Optional
 
-from src.core.message import Message
+from src.core.message import Message, VectorClock
 
 
 class StorageService:
@@ -34,26 +34,51 @@ class StorageService:
             cursor = conn.cursor()
 
             cursor.execute(
-                """CREATE TABLE IF NOT EXISTS room_peers (
+                """
+                CREATE TABLE IF NOT EXISTS room_peers (
                     room_id TEXT,
                     peer_url TEXT,
                     last_seen REAL,
-                    PRIMARY KEY (room_id, peer_url))"""
+                    PRIMARY KEY (room_id, peer_url)
+                    )
+                """
             )
 
             cursor.execute(
-                """CREATE TABLE IF NOT EXISTS messages (
-                                message_id TEXT PRIMARY KEY,
-                                room_id TEXT,
-                                sender_id TEXT,
-                                content TEXT,
-                                vector_clock TEXT,
-                                created_at REAL)"""
+                """
+                CREATE TABLE IF NOT EXISTS messages (
+                    message_id TEXT PRIMARY KEY,
+                    room_id TEXT,
+                    sender_id TEXT,
+                    content TEXT,
+                    vector_clock TEXT,
+                    created_at REAL
+                    )
+                """
             )
 
             cursor.execute(
-                """CREATE INDEX IF NOT EXISTS idx_messages_created_at
-                                ON messages(created_at)"""
+                """
+                CREATE TABLE IF NOT EXISTS snapshots (
+                    room_id TEXT PRIMARY KEY,
+                    vector_clock TEXT,
+                    last_processed_time REAL
+                    )
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_messages_created_at
+                    ON messages(created_at)
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_messages_room_id
+                    ON messages(room_id)
+                """
             )
 
             conn.commit()
@@ -66,7 +91,12 @@ class StorageService:
 
         with self._get_conn() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT 1 FROM messages WHERE message_id = ?", (message_id,))
+            cursor.execute(
+                """
+                SELECT 1 FROM messages WHERE message_id = ?
+                """,
+                (message_id,),
+            )
             return cursor.fetchone() is not None
 
     def add_message(self, message: Message) -> None:
@@ -79,8 +109,8 @@ class StorageService:
             cursor.execute(
                 """
                 INSERT OR IGNORE INTO messages
-                (message_id, room_id, sender_id, content, vector_clock, created_at)
-                VALUES (?,?, ?, ?, ?, ?)
+                    (message_id, room_id, sender_id, content, vector_clock, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.message_id,
@@ -93,16 +123,55 @@ class StorageService:
             )
             conn.commit()
 
+    def save_snapshot(self, room_id: str, vector_clock: VectorClock) -> None:
+        """
+        Saves the current vector clock state for a room.
+        """
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            vc_json = json.dumps(vector_clock)
+            current_time = time.time()
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO snapshots
+                    (room_id, vector_clock, last_processed_time)
+                    VALUES (?, ?, ?)
+                """,
+                (room_id, vc_json, current_time),
+            )
+            conn.commit()
+
+    def load_snapshot(self, room_id: str) -> tuple[Optional[VectorClock], float]:
+        """
+        Loads the latest snapshot for a room.
+        Returns: (VectorClock, last_processed_time) or (None, 0.0)
+        """
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT vector_clock, last_processed_time 
+                    FROM snapshots 
+                    WHERE room_id = ?
+                """,
+                (room_id,),
+            )
+
+            row = cursor.fetchone()
+            if row:
+                return json.loads(row["vector_clock"]), row["last_processed_time"]
+            return None, 0.0
+
     def get_all_messages(self, limit: int = 100, offset: int = 0) -> List[Message]:
         """Retreives all messages and converts them to Pydantic objects"""
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                           SELECT * FROM messages
-                           ORDER BY created_at ASC
-                           LIMIT ? OFFSET ?
-                           """,
+                SELECT * FROM messages
+                    ORDER BY created_at ASC
+                    LIMIT ? OFFSET ?
+                """,
                 (limit, offset),
             )
             rows = cursor.fetchall()
@@ -123,7 +192,11 @@ class StorageService:
         """
         with self._get_conn() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT vector_clock FROM messages")
+            cursor.execute(
+                """
+                SELECT vector_clock FROM messages
+                """
+            )
             rows = cursor.fetchall()
 
             max_counter = 0
@@ -136,7 +209,13 @@ class StorageService:
         """Get all known peers in a room."""
         with self._get_conn() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT peer_url FROM room_peers WHERE room_id = ?", (room_id,))
+            cursor.execute(
+                """
+                SELECT peer_url FROM room_peers 
+                    WHERE room_id = ?
+                """,
+                (room_id,),
+            )
 
             peers = [row["peer_url"] for row in cursor.fetchall()]
             return peers
@@ -146,10 +225,11 @@ class StorageService:
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                """INSERT OR REPLACE INTO room_peers
-                              (room_id, peer_url, last_seen)
-                              VALUES (?, ?, ?)
-                           """,
+                """
+                INSERT OR REPLACE INTO room_peers
+                    (room_id, peer_url, last_seen)
+                    VALUES (?, ?, ?)
+                """,
                 (room_id, peer_url, time.time()),
             )
             conn.close()
