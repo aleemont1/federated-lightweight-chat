@@ -30,19 +30,27 @@ class GossipService:
         self._running = True
         logger.info("[%s] Started syncing. Initial peers: %s", self.node_id, self.peers)
 
-        await asyncio.sleep(3)
+        try:
+            # Initial warmup delay
+            await asyncio.sleep(3)
 
-        while self._running:
-            try:
-                if self.peers:
-                    # Choose a random peer to sync with
-                    target = secrets.choice(self.peers)
-                    if target != self.node_addr:
-                        await self._push_data(target)
-            # pylint: disable=broad-exception-caught
-            except Exception as e:
-                logger.error("Gossip error: %s", e)
-            await asyncio.sleep(2)
+            while self._running:
+                try:
+                    if self.peers:
+                        # Choose a random peer to sync with
+                        target = secrets.choice(self.peers)
+                        if target != self.node_addr:
+                            await self._push_data(target)
+                # pylint: disable=broad-exception-caught
+                except Exception as e:
+                    logger.error("Gossip error: %s", e)
+
+                await asyncio.sleep(2)
+
+        finally:
+            # Ensure the flag is reset to False when the task stops, crashes, or is cancelled.
+            logger.info("[%s] Gossip loop terminated.", self.node_id)
+            self._running = False
 
     def stop(self) -> None:
         """
