@@ -54,14 +54,19 @@ def mock_dependencies():
 @pytest.mark.asyncio
 async def test_initialize_success(node_service, mock_dependencies):
     """Test successful initialization flow."""
-    _, mock_gossip_cls = mock_dependencies
+    (
+        mock_storage_cls,
+        mock_gossip_cls,
+    ) = mock_dependencies
     gossip_instance = mock_gossip_cls.return_value
+    storage_instance = mock_storage_cls.return_value
 
     await node_service.initialize("test_user")
 
     assert node_service.is_initialized()
     assert node_service.state.node_id == "test_user"
 
+    assert node_service.storage is storage_instance
     # Verify Gossip started correctly
     mock_gossip_cls.assert_called_once()
     gossip_instance.start.assert_called_once()
