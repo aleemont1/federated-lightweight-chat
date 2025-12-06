@@ -151,3 +151,6 @@ class LocalNodeService(INodeService):
         self._storage = None
         self._gossip = None
         logger.info("Node shutdown complete.")
+
+
+node_service: INodeService = LocalNodeService()
