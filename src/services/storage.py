@@ -185,6 +185,30 @@ class StorageService:
 
         return messages
 
+    def get_all_room_messages(self, room_id: str, limit: int = 100, offset: int = 0) -> List[Message]:
+        """Retreives all messages and converts them to Pydantic objects"""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM messages
+                    WHERE room_id = ?
+                    ORDER BY created_at ASC
+                    LIMIT ? OFFSET ?
+                """,
+                (room_id, limit, offset),
+            )
+            rows = cursor.fetchall()
+
+            messages = []
+
+            for row in rows:
+                msg_dict = dict(row)
+                msg_dict["vector_clock"] = json.loads(msg_dict["vector_clock"])
+                messages.append(Message(**msg_dict))
+
+        return messages
+
     def get_messages_after(self, room_id: str, timestamp: float) -> List[Message]:
         """
         Retrieves messages for a room that arrived AFTER a specific timestamp.

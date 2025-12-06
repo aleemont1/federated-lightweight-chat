@@ -157,3 +157,47 @@ def test_peers_management(storage_service):
 
     assert len(peers) == 1
     assert peers[0] == peer
+
+
+def test_get_all_room_messages(storage_service):
+    """
+    Test retrieval of messages for a specific room with pagination.
+    """
+    room_target = "target_room"
+    room_other = "other_room"
+
+    # Add messages to target room (ordered by time)
+    for i in range(5):
+        msg = Message(
+            room_id=room_target,
+            sender_id="tester",
+            content=f"msg_{i}",
+            created_at=time.time() + i,  # Ensure ordering
+        )
+        storage_service.add_message(msg)
+
+    # Add message to another room (should be ignored)
+    msg_other = Message(room_id=room_other, sender_id="tester", content="noise")
+    storage_service.add_message(msg_other)
+
+    # 1. Fetch all messages for target room
+    messages = storage_service.get_all_room_messages(room_target, limit=10)
+    assert len(messages) == 5
+    assert all(m.room_id == room_target for m in messages)
+    assert messages[0].content == "msg_0"
+
+    # 2. Test Pagination (Limit)
+    messages_limit = storage_service.get_all_room_messages(room_target, limit=2)
+    assert len(messages_limit) == 2
+    assert messages_limit[0].content == "msg_0"
+    assert messages_limit[1].content == "msg_1"
+
+    # 3. Test Pagination (Offset)
+    messages_offset = storage_service.get_all_room_messages(room_target, limit=2, offset=2)
+    assert len(messages_offset) == 2
+    assert messages_offset[0].content == "msg_2"
+    assert messages_offset[1].content == "msg_3"
+
+    # 4. Test Empty Room
+    empty = storage_service.get_all_room_messages("empty_room")
+    assert len(empty) == 0
