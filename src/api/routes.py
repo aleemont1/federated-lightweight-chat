@@ -31,7 +31,7 @@ class SendMessageRequest(BaseModel):
 
 
 @router.post("/login", response_model=User)
-async def login(credentials: LoginRequest) -> type[User]:
+async def login(credentials: LoginRequest) -> User:
     """
     Login endpoint.
     1. Authenticates user via AuthProvider
@@ -54,7 +54,7 @@ async def login(credentials: LoginRequest) -> type[User]:
                 detail=f"Node initialization failed: {str(e)}",
             )
 
-    return User
+    return user
 
 
 @router.get("/health")
