@@ -88,3 +88,55 @@ async def get_messages(
     messages = node_service.storage.get_all_room_messages(room_id=room_id, limit=limit, offset=offset)
 
     return messages
+
+
+@router.post("/messages", response_model=Message, status_code=status.HTTP_201_CREATED)
+async def send_message(
+    payload: SendMessageRequest, current_user: User = Depends(get_current_user)
+) -> Message:
+
+    if not node_service.state or not node_service.storage:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Node service unavailable."
+        )
+
+    node_service.state.increment_clock(payload.room_id)
+    current_clock = node_service.state.get_clock(payload.room_id)
+
+    new_msg = Message(
+        room_id=payload.room_id,
+        sender_id=current_user.username,
+        content=payload.content,
+        vector_clock=current_clock,
+    )
+
+    node_service.storage.add_message(new_msg)
+
+    return new_msg
+
+
+# === Replication route (for P2P) ===
+
+
+@router.post("/replication")
+async def replication_endpoint(message: Message) -> Dict[str, str]:
+    """
+    Endpoint called by other nodes to gossip messages.
+    """
+    if not node_service.is_initialized() or not node_service.state or not node_service.storage:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Node not ready to receive replication."
+        )
+
+    if node_service.storage.message_exists(message.message_id):
+        return {"status": "ignored"}
+
+    # Merge my vector clocks with the received one.
+    node_service.state.update_clock(message.room_id, message.vector_clock)
+
+    # Save
+    node_service.storage.add_message(message)
+
+    logger.info("Replicated message %s from %s", message.message_id, message.sender_id)
+
+    return {"status": "replicated"}
