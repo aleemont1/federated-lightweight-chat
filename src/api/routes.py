@@ -14,6 +14,7 @@ from src.core.auth_models import LoginRequest, User
 from src.core.message import Message
 from src.services.auth import current_auth_provider
 from src.services.node import node_service
+from src.services.websocket import manager
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,8 @@ async def send_message(
 
     node_service.storage.add_message(new_msg)
 
+    await manager.publish(new_msg, payload.room_id)
+
     return new_msg
 
 
@@ -136,6 +139,8 @@ async def replication_endpoint(message: Message) -> Dict[str, str]:
 
     # Save
     node_service.storage.add_message(message)
+
+    await manager.publish(message, message.room_id)
 
     logger.info("Replicated message %s from %s", message.message_id, message.sender_id)
 

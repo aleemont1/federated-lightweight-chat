@@ -24,6 +24,7 @@ from src.main import app
 # Create TestClient
 client = TestClient(app)
 
+
 # --- Fixtures ---
 
 
@@ -60,6 +61,20 @@ def mock_auth_provider():
         # We replace the method on the mock object with a fresh AsyncMock.
         mock_auth.authenticate = AsyncMock()
         yield mock_auth
+
+
+@pytest.fixture
+def mock_websocket_manager():
+    """
+    Patches the WebSocket manager in the routes module.
+    Prevents Redis connection errors during tests.
+    """
+    with patch("src.api.routes.manager") as mock_mgr:
+        mock_mgr.publish = AsyncMock()
+        mock_mgr.broadcast = AsyncMock()
+        mock_mgr.connect = AsyncMock()
+        mock_mgr.disconnect = MagicMock()
+        yield mock_mgr
 
 
 @pytest.fixture
@@ -137,7 +152,7 @@ def test_get_messages(mock_node_service, override_auth_dependency):
     assert data[0]["content"] == "hello"
 
 
-def test_send_message(mock_node_service, override_auth_dependency):
+def test_send_message(mock_node_service, override_auth_dependency, mock_websocket_manager):
     """Test sending a message."""
     payload = {"content": "Hello World", "room_id": "general"}
 
@@ -149,9 +164,12 @@ def test_send_message(mock_node_service, override_auth_dependency):
     mock_node_service.state.increment_clock.assert_called_with("general")
     mock_node_service.storage.add_message.assert_called_once()
 
+    # VERIFY: Ensure the message was published to Redis via the manager
+    mock_websocket_manager.publish.assert_called_once()
+
 
 @pytest.mark.asyncio
-async def test_replication_receive(mock_node_service):
+async def test_replication_receive(mock_node_service, mock_websocket_manager):
     """Test receiving gossip."""
     msg_payload = Message(room_id="general", sender_id="remote", content="sync").model_dump(mode="json")
 
@@ -163,6 +181,9 @@ async def test_replication_receive(mock_node_service):
 
     mock_node_service.state.update_clock.assert_called()
     mock_node_service.storage.add_message.assert_called()
+
+    # VERIFY: Ensure the message was published to Redis via the manager
+    mock_websocket_manager.publish.assert_called_once()
 
 
 def test_replication_idempotency(mock_node_service):
