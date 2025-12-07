@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  # Node 1: Alice
+  flc-alice:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    image: flc-node:latest
+    container_name: flc-alice
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_NAME=FLC-Alice
+      - SERVER_PORT=8000
+      - NODE_ID=alice
+      - PEERS=http://flc-bob:8000
+      - ADVERTISED_ADDR=http://flc-alice:8000
+      # Persistence
+      - DB_NAME=/data/alice.db
+    volumes:
+      - ./docker_data/alice:/data
+    networks:
+      - flc-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Node 2: Bob
+  flc-bob:
+    image: flc-node:latest
+    container_name: flc-bob
+    ports:
+      - "8001:8000" 
+    environment:
+      - APP_NAME=FLC-Bob
+      - SERVER_PORT=8000 
+      - NODE_ID=bob
+      - PEERS=http://flc-alice:8000
+      - ADVERTISED_ADDR=http://flc-bob:8000
+      - DB_NAME=/data/bob.db
+    volumes:
+      - ./docker_data/bob:/data
+    networks:
+      - flc-net
+    depends_on:
+      - flc-alice
+
+networks:
+  flc-net:
+    driver: bridge
