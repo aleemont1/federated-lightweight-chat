@@ -66,12 +66,17 @@ class GossipService:
         if not msgs:
             return
 
+        # Ensure we don't double-slash if target has trailing slash
+        base_url = target.rstrip("/")
+        # FIX: The API router is mounted at /api, so the endpoint is /api/replication
+        replication_url = f"{base_url}/api/replication"
+
         async with httpx.AsyncClient(timeout=1.0) as client:
             for msg in msgs:
                 try:
                     payload = msg.model_dump(mode="json")
                     await client.post(
-                        f"{target}/replication",
+                        replication_url,
                         json=payload,
                         headers={"X-Origin-Node": self.node_addr},
                     )
