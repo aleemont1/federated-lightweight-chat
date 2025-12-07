@@ -10,14 +10,14 @@ x-node-defaults: &node-defaults
     retries: 5
   volumes:
     - ./docker_data/shared:/data
-  # FIX: Ensure volume permissions are set before starting
   depends_on:
     init-perms:
       condition: service_completed_successfully
+    redis:
+      condition: service_started
 
 services:
-  # --- Infrastructure Services ---
-  # Init container to fix volume permissions for non-root user
+  # Infrastructure
   init-perms:
     image: busybox
     command: sh -c "mkdir -p /data && chmod 777 /data"
@@ -26,8 +26,15 @@ services:
     networks:
       - flc-net
 
-  # --- App Nodes ---
-  # Node 0 (Alice) - The "Seed" node that everyone knows initially
+  redis:
+    image: redis:7-alpine
+    container_name: flc-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - flc-net
+
+  # App Nodes
   node-0:
     <<: *node-defaults
     container_name: flc-node-0
@@ -37,12 +44,11 @@ services:
       - APP_NAME=FLC-Node-0
       - SERVER_PORT=8000
       - NODE_ID=user_0
-      # Knows Node 1
       - PEERS=http://flc-node-1:8000
       - ADVERTISED_ADDR=http://flc-node-0:8000
       - DB_NAME=/data/user_0.db
+      - REDIS_URL=redis://flc-redis:6379
 
-  # Node 1
   node-1:
     <<: *node-defaults
     container_name: flc-node-1
@@ -52,14 +58,16 @@ services:
       - APP_NAME=FLC-Node-1
       - SERVER_PORT=8000
       - NODE_ID=user_1
-      # Knows Node 0 and 2 (Ring-like connection to ensure propagation hops)
       - PEERS=http://flc-node-0:8000,http://flc-node-2:8000
       - ADVERTISED_ADDR=http://flc-node-1:8000
       - DB_NAME=/data/user_1.db
-    # FIX: Merging dependencies manually as YAML anchors overwrite lists
+      - REDIS_URL=redis://flc-redis:6379
+    # Manual dependency merge
     depends_on:
       init-perms:
         condition: service_completed_successfully
+      redis:
+        condition: service_started
       node-0:
         condition: service_started
 
@@ -76,6 +84,7 @@ services:
       - PEERS=http://flc-node-1:8000,http://flc-node-3:8000
       - ADVERTISED_ADDR=http://flc-node-2:8000
       - DB_NAME=/data/user_2.db
+      - REDIS_URL=redis://flc-redis:6379
 
   # Node 3
   node-3:
@@ -90,6 +99,7 @@ services:
       - PEERS=http://flc-node-2:8000,http://flc-node-4:8000
       - ADVERTISED_ADDR=http://flc-node-3:8000
       - DB_NAME=/data/user_3.db
+      - REDIS_URL=redis://flc-redis:6379
 
   # Node 4
   node-4:
@@ -104,6 +114,7 @@ services:
       - PEERS=http://flc-node-3:8000,http://flc-node-5:8000
       - ADVERTISED_ADDR=http://flc-node-4:8000
       - DB_NAME=/data/user_4.db
+      - REDIS_URL=redis://flc-redis:6379
 
   # Node 5
   node-5:
@@ -118,6 +129,7 @@ services:
       - PEERS=http://flc-node-4:8000,http://flc-node-6:8000
       - ADVERTISED_ADDR=http://flc-node-5:8000
       - DB_NAME=/data/user_5.db
+      - REDIS_URL=redis://flc-redis:6379
 
   # Node 6
   node-6:
@@ -132,6 +144,7 @@ services:
       - PEERS=http://flc-node-5:8000,http://flc-node-7:8000
       - ADVERTISED_ADDR=http://flc-node-6:8000
       - DB_NAME=/data/user_6.db
+      - REDIS_URL=redis://flc-redis:6379
 
   # Node 7
   node-7:
@@ -146,6 +159,7 @@ services:
       - PEERS=http://flc-node-6:8000,http://flc-node-8:8000
       - ADVERTISED_ADDR=http://flc-node-7:8000
       - DB_NAME=/data/user_7.db
+      - REDIS_URL=redis://flc-redis:6379
 
   # Node 8
   node-8:
@@ -160,6 +174,7 @@ services:
       - PEERS=http://flc-node-7:8000,http://flc-node-9:8000
       - ADVERTISED_ADDR=http://flc-node-8:8000
       - DB_NAME=/data/user_8.db
+      - REDIS_URL=redis://flc-redis:6379
 
   # Node 9 (Closes the ring)
   node-9:
@@ -174,6 +189,7 @@ services:
       - PEERS=http://flc-node-8:8000,http://flc-node-0:8000
       - ADVERTISED_ADDR=http://flc-node-9:8000
       - DB_NAME=/data/user_9.db
+      - REDIS_URL=redis://flc-redis:6379
 
 networks:
   flc-net:
