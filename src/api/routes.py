@@ -1,6 +1,6 @@
 """
 API Routes definition.
-Handles Authentication, Chat operations, and Node management.
+Handles Authentication, Chat operations, Node management, and Real-time WebSockets.
 """
 
 import logging
@@ -14,6 +14,8 @@ from src.core.auth_models import LoginRequest, User
 from src.core.message import Message
 from src.services.auth import current_auth_provider
 from src.services.node import node_service
+
+# New Import for Real-Time Broadcasting
 from src.services.websocket import manager
 
 logger = logging.getLogger(__name__)
@@ -111,14 +113,20 @@ async def send_message(
         vector_clock=current_clock,
     )
 
+    # 1. Persist locally
     node_service.storage.add_message(new_msg)
 
+    # 2. Publish to Redis (Trigger Real-time broadcast across cluster)
+    # Only the node that RECEIVES the message from the client publishes it to Redis.
+    # This prevents echo loops where every node re-publishes the same message upon replication.
     await manager.publish(new_msg, payload.room_id)
 
     return new_msg
 
 
-# === Websocket connection Route ===
+# === WebSocket Route ===
+
+
 @router.websocket("/ws/{room_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: str) -> None:
     """
@@ -128,6 +136,9 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str) -> None:
     await manager.connect(websocket, room_id)
     try:
         while True:
+            # We keep the connection open.
+            # Currently, we assume upstream messages come via HTTP POST /messages,
+            # but we listen here to handle client disconnects gracefully.
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket, room_id)
@@ -155,7 +166,10 @@ async def replication_endpoint(message: Message) -> Dict[str, str]:
     # Save
     node_service.storage.add_message(message)
 
-    await manager.publish(message, message.room_id)
+    # FIX: Do NOT publish to Redis here.
+    # The message was already published by the node that created it.
+    # Publishing here causes N x N message flooding (Echo Chamber).
+    # Redis takes care of real-time. Gossip takes care of eventual persistence.
 
     logger.info("Replicated message %s from %s", message.message_id, message.sender_id)
 
