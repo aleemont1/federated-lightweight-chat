@@ -93,9 +93,9 @@ class ConnectionManager:
             try:
                 async for message in pubsub.listen():
                     if message["type"] == "message":
-                        data_dict = json.loads(message.data["data"])
-
                         try:
+                            data_dict = json.loads(message["data"])
+
                             msg_obj = Message(**data_dict)
                             await self.broadcast_to_local(msg_obj, room_id)
                         except Exception as e:
@@ -105,7 +105,8 @@ class ConnectionManager:
                 await pubsub.unsubscribe(channel)
                 logger.info("Unsubscribed from %s", channel)
             except Exception as e:
-                logger.error("Redis listener error for %s: %s", room_id, e)
+                # This catches connection errors to Redis itself
+                logger.error("Redis listener CRITICAL error for %s: %s", room_id, e)
 
         self.pubsub_tasks[room_id] = asyncio.create_task(listener())
 
