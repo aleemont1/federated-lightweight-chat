@@ -20,6 +20,8 @@ class Settings(BaseSettings):
 
     db_name: str | None = None
 
+    redis_url: str = "redis://localhost:6379"
+
     model_config = {"env_file": ".env"}
 
 
