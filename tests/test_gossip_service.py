@@ -84,7 +84,7 @@ async def test_push_data_with_messages(gossip_service, mock_storage) -> None:
         mock_storage.get_all_messages.assert_called_once()
         # 2. Correct post request made?
         mock_http_client.post.assert_called_once_with(
-            "http://target:8000/replication",
+            "http://target:8000/api/replication",
             json={"content": "hello"},
             headers={"X-Origin-Node": "http://me:8000"},
         )
