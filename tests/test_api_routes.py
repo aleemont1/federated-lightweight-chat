@@ -4,8 +4,9 @@ Uses FastAPI TestClient to simulate HTTP requests and WebSockets.
 Mocks core services (NodeService, AuthProvider, ConnectionManager) to test endpoints in isolation.
 """
 
-# Disable this warning as it is a false positive caused by pytest syntax
+# Disable these warnings as they are false positives caused by pytest syntax
 # pylint: disable=redefined-outer-scope
+# pylint: disable=redefined-outer-name
 
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -72,7 +73,8 @@ def mock_websocket_manager():
     with patch("src.api.routes.manager") as mock_mgr:
         # Setup async methods
 
-        # CRITICAL FIX: The connect mock must accept the websocket to complete the handshake
+        # Disable this pylint warning as it's a false positive due to Mock methods usage.
+        # pylint: disable=unused-argument
         async def mock_connect_side_effect(websocket, room_id):
             await websocket.accept()
 
@@ -181,7 +183,7 @@ def test_send_message(mock_node_service, override_auth_dependency, mock_websocke
 
 @pytest.mark.asyncio
 async def test_replication_receive(mock_node_service, mock_websocket_manager):
-    """Test receiving gossip (and verifying Redis publish)."""
+    """Test receiving gossip (and verifying Redis publish is NOT called)."""
     msg_payload = Message(room_id="general", sender_id="remote", content="sync").model_dump(mode="json")
 
     response = client.post("/api/replication", json=msg_payload)
@@ -192,8 +194,8 @@ async def test_replication_receive(mock_node_service, mock_websocket_manager):
     mock_node_service.state.update_clock.assert_called()
     mock_node_service.storage.add_message.assert_called()
 
-    # VERIFY: Replicated message published to Redis
-    mock_websocket_manager.publish.assert_called_once()
+    # VERIFY FIX: Replication should NOT trigger Redis publish to avoid loops
+    mock_websocket_manager.publish.assert_not_called()
 
 
 def test_replication_idempotency(mock_node_service, mock_websocket_manager):
