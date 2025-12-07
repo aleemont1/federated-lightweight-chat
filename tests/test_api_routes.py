@@ -4,6 +4,9 @@ Uses FastAPI TestClient to simulate HTTP requests.
 Mocks core services (NodeService, AuthProvider) to test endpoints in isolation.
 """
 
+# Disable this warning as it is a false positive caused by pytest syntax
+# pylint: disable=redefined-outer-scope
+
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -70,6 +73,8 @@ def override_auth_dependency():
 
 
 # --- Tests ---
+# Disable this warning as it is a false positive caused by pytest syntax
+# pylint: disable=unused-argument
 
 
 def test_health_check(mock_node_service):

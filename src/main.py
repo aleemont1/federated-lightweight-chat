@@ -24,6 +24,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# Disable these warnings as they are false positives caused by fasapi syntax
+# pylint: disable=redefined-outer-name
+# pylint: disable=unused-argument
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
@@ -34,11 +37,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Auto-initialize if running in Docker/Cloud with fixed ID
     if settings.node_id:
-        logger.info(f"Auto-initializing node: {settings.node_id}")
+        logger.info("Auto-initializing node: %s", settings.node_id)
         try:
             await node_service.initialize(settings.node_id)
         except ValueError as e:
-            logger.warning(f"Initialization skipped: {e}")
+            logger.warning("Initialization skipped: %s", e)
 
     yield
 
