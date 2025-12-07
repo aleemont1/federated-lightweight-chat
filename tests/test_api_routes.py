@@ -1,7 +1,7 @@
 """
 Unit tests for API Routes.
-Uses FastAPI TestClient to simulate HTTP requests.
-Mocks core services (NodeService, AuthProvider) to test endpoints in isolation.
+Uses FastAPI TestClient to simulate HTTP requests and WebSockets.
+Mocks core services (NodeService, AuthProvider, ConnectionManager) to test endpoints in isolation.
 """
 
 # Disable this warning as it is a false positive caused by pytest syntax
@@ -23,7 +23,6 @@ from src.main import app
 
 # Create TestClient
 client = TestClient(app)
-
 
 # --- Fixtures ---
 
@@ -66,13 +65,21 @@ def mock_auth_provider():
 @pytest.fixture
 def mock_websocket_manager():
     """
-    Patches the WebSocket manager in the routes module.
-    Prevents Redis connection errors during tests.
+    Patches the global websocket manager in the routes.
+    This prevents the code from trying to connect to a real Redis instance
+    AND ensures the WebSocket handshake is completed correctly in tests.
     """
     with patch("src.api.routes.manager") as mock_mgr:
+        # Setup async methods
+
+        # CRITICAL FIX: The connect mock must accept the websocket to complete the handshake
+        async def mock_connect_side_effect(websocket, room_id):
+            await websocket.accept()
+
+        mock_mgr.connect = AsyncMock(side_effect=mock_connect_side_effect)
         mock_mgr.publish = AsyncMock()
         mock_mgr.broadcast = AsyncMock()
-        mock_mgr.connect = AsyncMock()
+        # Setup sync methods
         mock_mgr.disconnect = MagicMock()
         yield mock_mgr
 
@@ -153,7 +160,7 @@ def test_get_messages(mock_node_service, override_auth_dependency):
 
 
 def test_send_message(mock_node_service, override_auth_dependency, mock_websocket_manager):
-    """Test sending a message."""
+    """Test sending a message (and verifying Redis publish)."""
     payload = {"content": "Hello World", "room_id": "general"}
 
     response = client.post("/api/messages", json=payload)
@@ -164,29 +171,32 @@ def test_send_message(mock_node_service, override_auth_dependency, mock_websocke
     mock_node_service.state.increment_clock.assert_called_with("general")
     mock_node_service.storage.add_message.assert_called_once()
 
-    # VERIFY: Ensure the message was published to Redis via the manager
+    # VERIFY: Message published to Redis
     mock_websocket_manager.publish.assert_called_once()
+    # Optional: Verify args
+    args, _ = mock_websocket_manager.publish.call_args
+    assert args[0].content == "Hello World"
+    assert args[1] == "general"
 
 
 @pytest.mark.asyncio
 async def test_replication_receive(mock_node_service, mock_websocket_manager):
-    """Test receiving gossip."""
+    """Test receiving gossip (and verifying Redis publish)."""
     msg_payload = Message(room_id="general", sender_id="remote", content="sync").model_dump(mode="json")
 
     response = client.post("/api/replication", json=msg_payload)
 
     assert response.status_code == 200
-    # Update expectation to match actual API behavior ("accepted")
     assert response.json()["status"] == "replicated"
 
     mock_node_service.state.update_clock.assert_called()
     mock_node_service.storage.add_message.assert_called()
 
-    # VERIFY: Ensure the message was published to Redis via the manager
+    # VERIFY: Replicated message published to Redis
     mock_websocket_manager.publish.assert_called_once()
 
 
-def test_replication_idempotency(mock_node_service):
+def test_replication_idempotency(mock_node_service, mock_websocket_manager):
     """Test ignoring duplicates."""
     mock_node_service.storage.message_exists.return_value = True
     msg_payload = Message(room_id="general", sender_id="remote", content="sync").model_dump(mode="json")
@@ -196,3 +206,25 @@ def test_replication_idempotency(mock_node_service):
     assert response.status_code == 200
     assert response.json()["status"] == "ignored"
     mock_node_service.storage.add_message.assert_not_called()
+    # Should NOT publish if ignored
+    mock_websocket_manager.publish.assert_not_called()
+
+
+def test_websocket_endpoint(mock_websocket_manager):
+    """
+    Test the WebSocket connection lifecycle.
+    """
+    # Use the context manager to simulate a connection
+    # Note: connect() mock MUST accept the socket or this will fail
+    with client.websocket_connect("/api/ws/general") as websocket:
+        # Verify connect called on manager
+        mock_websocket_manager.connect.assert_called_once()
+        args, _ = mock_websocket_manager.connect.call_args
+        # args[0] is the websocket object, args[1] is room_id
+        assert args[1] == "general"
+
+        # Send some text (optional, to verify loop processing)
+        websocket.send_text("ping")
+
+    # After context exit (disconnect), verify disconnect called
+    mock_websocket_manager.disconnect.assert_called_once()

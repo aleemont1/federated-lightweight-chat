@@ -6,7 +6,7 @@ Handles Authentication, Chat operations, and Node management.
 import logging
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel
 
 from src.api.dependencies import get_current_user
@@ -116,6 +116,21 @@ async def send_message(
     await manager.publish(new_msg, payload.room_id)
 
     return new_msg
+
+
+# === Websocket connection Route ===
+@router.websocket("/ws/{room_id}")
+async def websocket_endpoint(websocket: WebSocket, room_id: str) -> None:
+    """
+    Real-time chat endpoint.
+    Manages the connection lifecycle and subscribes the user to the room's Redis channel.
+    """
+    await manager.connect(websocket, room_id)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, room_id)
 
 
 # === Replication route (for P2P) ===
