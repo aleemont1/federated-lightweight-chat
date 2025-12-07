@@ -4,7 +4,6 @@ Unit tests for the Redis-backed WebSocket Manager.
 
 # Disable these false positives as they are caused by pytest syntax
 # pylint: disable=redefined-outer-name
-# pylint: disable=redefined-outer-scope
 
 import asyncio
 import json
@@ -137,6 +136,8 @@ async def test_redis_listener_resilience(manager, mock_redis, caplog):
     # 2. Mock broadcast to verify success (we don't want to test WebSocket sending here)
     manager.broadcast_to_local = AsyncMock()
 
+    # Disable this warning as the protected method only needs to be accessed in the scope of this test.
+    # pylint: disable=protected-access
     # 3. Start the subscription
     # We call the real method here, which starts the background task
     await manager._subscribe_to_redis(room_id)

@@ -5,7 +5,6 @@ Mocks core services (NodeService, AuthProvider, ConnectionManager) to test endpo
 """
 
 # Disable these warnings as they are false positives caused by pytest syntax
-# pylint: disable=redefined-outer-scope
 # pylint: disable=redefined-outer-name
 
 import uuid
