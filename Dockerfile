@@ -22,7 +22,7 @@ RUN poetry config virtualenvs.in-project true \
     && poetry install --no-root --only main --no-interaction --no-ansi
 
 # --- Stage 2: Final Runtime ---
-FROM python:3.11-slim as runtime
+FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 

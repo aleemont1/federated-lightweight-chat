@@ -1,5 +1,3 @@
-version: '3.8'
-
 x-node-defaults: &node-defaults
   build: .
   image: flc-node:latest
