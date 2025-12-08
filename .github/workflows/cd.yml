@@ -34,8 +34,8 @@ jobs:
           push: true # ORA PUSHIAMO!
           # Taggiamo sia come "latest" che con l'hash del commit per versioning
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/flc-node:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/flc-node:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/federated-lightweight-chat:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/federated-lightweight-chat:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
