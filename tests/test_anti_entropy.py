@@ -2,6 +2,7 @@
 Unit tests for explicit room synchronization (Anti-Entropy).
 """
 
+# pylint: disable=duplicate-code
 # pylint: disable=redefined-outer-name
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,11 +13,13 @@ from src.services.gossip import GossipService
 
 @pytest.fixture
 def mock_storage():
+    """Returns mock storage"""
     return MagicMock()
 
 
 @pytest.fixture
 def gossip_service(mock_storage):
+    """Returns gossip service"""
     return GossipService(
         storage=mock_storage, node_id="test_node", node_addr="http://me:8000", peers=["http://peer:8000"]
     )
