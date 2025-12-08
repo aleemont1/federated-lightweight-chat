@@ -78,6 +78,33 @@ async def get_me(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
+@router.get("/rooms", response_model=List[str])
+async def get_rooms(current_user: User = Depends(get_current_user)) -> List[str]:
+    """
+    Retrieves the list of rooms this node has participated in.
+    """
+    if not node_service.storage:
+        raise HTTPException(status_code=500, detail="Storage not ready")
+
+    return node_service.storage.get_known_rooms()
+
+
+@router.post("/rooms/{room_id}/sync")
+async def sync_room(room_id: str, current_user: User = Depends(get_current_user)) -> Dict[str, str]:
+    """
+    Triggers an immediate background sync for a specific room.
+    Useful when joining a room to get history faster than random gossip.
+    """
+    if not node_service.is_initialized():
+        raise HTTPException(status_code=500, detail="Node not ready")
+
+    logger.info("Manual sync requested for room: %s", room_id)
+    # We await this to ensure data is populated before the frontend reloads history
+    await node_service.sync_room(room_id)
+
+    return {"status": "synced", "room_id": room_id}
+
+
 @router.get("/messages", response_model=List[Message])
 async def get_messages(
     room_id: str = "general", limit: int = 50, offset: int = 0, current_user: User = Depends(get_current_user)
