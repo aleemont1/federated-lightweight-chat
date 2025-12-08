@@ -4,8 +4,8 @@ Uses FastAPI TestClient to simulate HTTP requests and WebSockets.
 Mocks core services (NodeService, AuthProvider, ConnectionManager) to test endpoints in isolation.
 """
 
-# Disable these warnings as they are false positives caused by pytest syntax
-# pylint: disable=redefined-outer-name
+# Disable this warning as it is a false positive caused by pytest syntax
+# pylint: disable=redefined-outer-scope
 
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,12 +13,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+# Import the module we are patching to use patch.object (safer than string strings)
+import src.api.routes
 from src.api.dependencies import get_current_user
 from src.core.auth_models import User
 from src.core.message import Message
-
-# Import app inside tests or fixtures to ensure patches apply if needed,
-# though patching modules should work fine with global app.
 from src.main import app
 
 # Create TestClient
@@ -30,7 +29,8 @@ client = TestClient(app)
 @pytest.fixture
 def mock_node_service():
     """Patches the global node_service singleton in the routes module."""
-    with patch("src.api.routes.node_service") as mock_service:
+    # Use patch.object for robust patching (avoids string path typos)
+    with patch.object(src.api.routes, "node_service") as mock_service:
         # 1. Setup 'is_initialized' (sync method)
         mock_service.is_initialized.return_value = True
 
@@ -46,6 +46,7 @@ def mock_node_service():
         # 4. Setup 'storage' property
         mock_storage = MagicMock()
         mock_storage.get_all_room_messages.return_value = []
+        mock_storage.get_known_rooms.return_value = ["general", "topic_x"]
         mock_storage.message_exists.return_value = False
         mock_service.storage = mock_storage
 
@@ -55,7 +56,7 @@ def mock_node_service():
 @pytest.fixture
 def mock_auth_provider():
     """Patches the global auth provider in the routes module."""
-    with patch("src.api.routes.current_auth_provider") as mock_auth:
+    with patch.object(src.api.routes, "current_auth_provider") as mock_auth:
         # Crucial: authenticate MUST be an AsyncMock because it's awaited in the route.
         # We replace the method on the mock object with a fresh AsyncMock.
         mock_auth.authenticate = AsyncMock()
@@ -69,11 +70,10 @@ def mock_websocket_manager():
     This prevents the code from trying to connect to a real Redis instance
     AND ensures the WebSocket handshake is completed correctly in tests.
     """
-    with patch("src.api.routes.manager") as mock_mgr:
+    with patch.object(src.api.routes, "manager") as mock_mgr:
         # Setup async methods
 
-        # Disable this pylint warning as it's a false positive due to Mock methods usage.
-        # pylint: disable=unused-argument
+        # CRITICAL FIX: The connect mock must accept the websocket to complete the handshake
         async def mock_connect_side_effect(websocket, room_id):
             await websocket.accept()
 
@@ -158,6 +158,15 @@ def test_get_messages(mock_node_service, override_auth_dependency):
     data = response.json()
     assert len(data) == 1
     assert data[0]["content"] == "hello"
+
+
+def test_get_rooms(mock_node_service, override_auth_dependency):
+    """Test retrieving known rooms."""
+    response = client.get("/api/rooms")
+    assert response.status_code == 200
+    data = response.json()
+    assert "general" in data
+    assert "topic_x" in data
 
 
 def test_send_message(mock_node_service, override_auth_dependency, mock_websocket_manager):

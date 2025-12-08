@@ -181,3 +181,43 @@ async def test_start_loop_exception_handling(gossip_service, caplog) -> None:
         # Verify the exception was caught and logged
         assert "Gossip error: Random failure" in caplog.text
         assert mock_sleep.call_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_sync_room_messages(gossip_service, mock_storage):
+    """
+    Test active pull of messages via sync_room_messages.
+    We limit peers to 1 to ensure assert_called_once works deterministically.
+    """
+    room_id = "general"
+    mock_msg = {
+        "message_id": "1",
+        "content": "synced",
+        "room_id": "general",
+        "sender_id": "peer",
+        "vector_clock": {},
+        "created_at": 100,
+    }
+
+    # FIX: Restrict to single peer to prevent multiple loop iterations/calls
+    gossip_service.peers = ["http://peer1:8000"]
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client_cls.return_value = mock_client
+
+        # Setup successful response
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [mock_msg]
+        mock_client.get.return_value = mock_response
+
+        # Pretend we don't have this message yet
+        mock_storage.message_exists.return_value = False
+
+        await gossip_service.sync_room_messages(room_id)
+
+        # Verify logic
+        mock_client.get.assert_called()
+        mock_storage.add_message.assert_called_once()
