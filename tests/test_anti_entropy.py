@@ -2,6 +2,7 @@
 Unit tests for explicit room synchronization (Anti-Entropy).
 """
 
+# pylint: disable=redefined-outer-name
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

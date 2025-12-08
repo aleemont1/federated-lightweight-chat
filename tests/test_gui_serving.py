@@ -3,6 +3,7 @@ Integration tests for Static File Serving (GUI).
 Ensures the backend correctly serves the Single Page Application assets.
 """
 
+# pylint: disable=duplicate-code
 from fastapi.testclient import TestClient
 
 from src.main import app
