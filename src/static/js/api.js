@@ -7,35 +7,53 @@ export class ApiClient {
         this.baseUrl = baseUrl;
     }
 
+    async _request(endpoint, options = {}) {
+        const url = `${this.baseUrl}${endpoint}`;
+        const response = await fetch(url, options);
+        
+        if (!response.ok) {
+            let errorMessage = `Error ${response.status}`;
+            try {
+                const errorData = await response.json();
+                errorMessage = errorData.detail || errorMessage;
+            } catch (e) {
+                // Fallback
+            }
+            throw new Error(errorMessage);
+        }
+        return await response.json();
+    }
+
     async login(username, password) {
-        const response = await fetch(`${this.baseUrl}/login`, {
+        return this._request('/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username, password })
         });
-        if (!response.ok) throw new Error('Login failed');
-        return await response.json();
     }
 
     async getHealth() {
-        const response = await fetch(`${this.baseUrl}/health`);
-        return await response.json();
+        return this._request('/health');
     }
 
     async getMessages(roomId, limit = 50) {
-        const response = await fetch(`${this.baseUrl}/messages?room_id=${roomId}&limit=${limit}`);
-        if (!response.ok) throw new Error('Failed to fetch messages');
-        return await response.json();
+        return this._request(`/messages?room_id=${roomId}&limit=${limit}`);
+    }
+    
+    async getRooms() {
+        return this._request('/rooms');
+    }
+
+    async syncRoom(roomId) {
+        return this._request(`/rooms/${roomId}/sync`, { method: 'POST' });
     }
 
     async sendMessage(roomId, content) {
-        const response = await fetch(`${this.baseUrl}/messages`, {
+        return this._request('/messages', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ content, room_id: roomId })
         });
-        if (!response.ok) throw new Error('Failed to send message');
-        return await response.json();
     }
 
     async getPeers(roomId) {
