@@ -1,0 +1,165 @@
+/* * Main Stylesheet for Federated Lightweight Chat
+ * Follows mobile-first, clean design principles.
+ */
+
+:root {
+    --primary-color: #3b82f6;
+    --bg-color: #f3f4f6;
+    --chat-bg: #ffffff;
+    --text-color: #1f2937;
+    --border-color: #e5e7eb;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    margin: 0;
+    height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+#app {
+    width: 100%;
+    max-width: 900px;
+    height: 90vh;
+    background-color: var(--chat-bg);
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    border-radius: 8px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Login View */
+#login-view {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 1rem;
+}
+
+.input-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+input {
+    padding: 0.75rem;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    font-size: 1rem;
+}
+
+button {
+    padding: 0.75rem 1.5rem;
+    background-color: var(--primary-color);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+button:hover {
+    opacity: 0.9;
+}
+
+/* Chat View */
+#chat-view {
+    display: flex;
+    height: 100%;
+}
+
+aside {
+    width: 250px;
+    background-color: #f9fafb;
+    border-right: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+}
+
+.sidebar-header {
+    padding: 1rem;
+    font-weight: bold;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.room-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.5rem;
+}
+
+.room-item {
+    padding: 0.75rem;
+    cursor: pointer;
+    border-radius: 4px;
+}
+
+.room-item:hover, .room-item.active {
+    background-color: #e5e7eb;
+}
+
+main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+}
+
+header {
+    padding: 1rem;
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+#message-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.message {
+    max-width: 70%;
+    padding: 0.75rem;
+    border-radius: 8px;
+    background-color: #f3f4f6;
+    align-self: flex-start;
+}
+
+.message.own {
+    background-color: #dbeafe;
+    align-self: flex-end;
+}
+
+.message-meta {
+    font-size: 0.75rem;
+    color: #6b7280;
+    margin-bottom: 0.25rem;
+}
+
+footer {
+    padding: 1rem;
+    border-top: 1px solid var(--border-color);
+    display: flex;
+    gap: 0.5rem;
+}
+
+footer input {
+    flex: 1;
+}
+
+.hidden {
+    display: none !important;
+}

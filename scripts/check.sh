@@ -22,7 +22,7 @@ poetry run bandit -r src -c pyproject.toml || exit 1
 
 # 3. Tests (Only run if static analysis passes)
 echo "---Running Tests---"
-poetry run pytest -vv --color=yes
+poetry run pytest -vv --color=yes --cov=src --cov-report=term-missing --cov-fail-under=80
 
 echo "All checks passed!"
 
