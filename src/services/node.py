@@ -49,6 +49,11 @@ class INodeService(ABC):
         pass
 
     @abstractmethod
+    async def sync_room(self, room_id: str) -> None:
+        """Triggers a manual sync for a room."""
+        pass
+
+    @abstractmethod
     async def shutdown(self) -> None:
         """
         Gracefully shuts the node down, cleaning resources.
@@ -115,6 +120,15 @@ class LocalNodeService(INodeService):
                 logger.info("State restored. Active rooms: %s", list(self._state.room_clocks.keys()))
 
         await self._start_gossip(user_id)
+
+    async def sync_room(self, room_id: str) -> None:
+        """Manually pulls data for a room from peers."""
+        if self._gossip:
+            # We fire and wait, or fire and forget?
+            # For UI responsiveness, waiting is better so we can refresh the list after.
+            await self._gossip.sync_room_messages(room_id)
+        else:
+            logger.warning("Cannot sync room %s: Gossip service not active", room_id)
 
     async def _start_gossip(self, user_id: str) -> None:
         peers_list = [p.strip() for p in settings.peers.split(",") if p.strip()]
