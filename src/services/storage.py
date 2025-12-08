@@ -247,6 +247,21 @@ class StorageService:
 
             return [row["room_id"] for row in cursor.fetchall()]
 
+    def get_known_rooms(self) -> List[str]:
+        """
+        Retrieves a list of all room IDs that have at least one message.
+        """
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            # DISTINCT ensures we get a clean list of rooms
+            cursor.execute(
+                """
+                SELECT DISTINCT room_id FROM messages
+                ORDER BY room_id ASC
+                """
+            )
+            return [row["room_id"] for row in cursor.fetchall()]
+
     def get_latest_clock(self, node_id: str) -> int:
         """
         Retreives the highest counter known for this node.
