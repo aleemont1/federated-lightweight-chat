@@ -4,7 +4,6 @@ __pycache__/
 *$py.class
 
 # --- Virtual Environments ---
-# Poetry con "in-project: true" crea .venv qui
 .venv/
 env/
 venv/
@@ -21,7 +20,6 @@ htmlcov/
 .pytest_cache/
 
 # --- Project Specifics ---
-# Database SQLite (NON committare la cronologia chat locale!)
 *.db
 *.sqlite
 *.sqlite3
@@ -37,6 +35,5 @@ logs/
 .DS_Store
 
 # --- Docker ---
-# Ignoriamo eventuali volumi locali mappati se dovessi crearli
-docker-data/
+docker_data/
 
