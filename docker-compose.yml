@@ -18,19 +18,33 @@ x-node-defaults: &node-defaults
 
 services:
   # Infrastructure
+  # Handles permissions for BOTH Shared (SQLite) and Redis folders
   init-perms:
     image: busybox
-    command: sh -c "mkdir -p /data && chmod 777 /data"
+    # Mount the folders to /shared and /redis inside this helper container
+    # and ensure they are writable (777) so the specific containers can write to them.
+    command: sh -c "mkdir -p /shared /redis && chmod 777 /shared /redis"
     volumes:
-      - ./docker_data/shared:/data
+      - ./docker_data/shared:/shared
+      - ./docker_data/redis:/redis
     networks:
       - flc-net
 
   redis:
     image: redis:7-alpine
     container_name: flc-redis
+    # Explicit command to enable append-only persistence
+    # and bind to all interfaces for container networking.
+    command: redis-server --appendonly yes --bind 0.0.0.0
     ports:
       - "6379:6379"
+    volumes:
+      - ./docker_data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     networks:
       - flc-net
 
@@ -62,7 +76,7 @@ services:
       - ADVERTISED_ADDR=http://flc-node-1:8000
       - DB_NAME=/data/user_1.db
       - REDIS_URL=redis://flc-redis:6379
-    # Manual dependency merge
+    # Manual dependency merge to ensure ring order startup
     depends_on:
       init-perms:
         condition: service_completed_successfully
