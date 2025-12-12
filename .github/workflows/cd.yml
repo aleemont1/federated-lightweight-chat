@@ -82,9 +82,11 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # Advanced caching to speed up builds
+          file: Dockerfile
+          push: true # ORA PUSHIAMO!
+          # Taggiamo sia come "latest" che con l'hash del commit per versioning
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/federated-lightweight-chat:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/federated-lightweight-chat:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
