@@ -1,21 +1,73 @@
-name: FLC CD Pipeline
+# .github/workflows/cd.yml
+name: FLC Production Pipeline
 
-on: 
+on:
   push:
-    branches: [ "main", "master" ]
+    branches: ["main"]
+    # Trigger also on semantic version tags (e.g., v1.0.0)
+    tags: ["v*"]
 
 concurrency:
-    group: ${{ github.workflow }}-${{ github.ref }}
-    cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false # Don't cancel production builds midway
+
 jobs:
-# JOB 2: Build & Push to Docker Hub
-  docker-build-push:
-    name: Build & Push Docker Image
+  # STAGE 1: Verify before Deploy
+  # We re-run tests here to ensure the exact commit being deployed is green.
+  tests:
+    name: Pre-Deploy Verification
     runs-on: ubuntu-latest
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Cache Poetry venv
+        uses: actions/cache@v3
+        with:
+          path: .venv
+          key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
+
+      - name: Install Dependencies
+        run: poetry install --no-interaction --no-root --with dev
+
+      - name: Run Tests
+        run: poetry run pytest tests/
+
+  # STAGE 2: Build & Push
+  # Only runs if 'tests' passes successfully
+  build-and-push:
+    name: Docker Build & Push
+    needs: tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Generates Docker tags and labels automatically based on git context
+      # Outputs: 'flc-node:latest', 'flc-node:sha-xxxx', 'flc-node:1.0.0'
+      - name: Docker Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/federated-lightweight-chat
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha
+            type=ref,event=tag
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -30,12 +82,9 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: Dockerfile
-          push: true # ORA PUSHIAMO!
-          # Taggiamo sia come "latest" che con l'hash del commit per versioning
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/flc-node:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/flc-node:${{ github.sha }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Advanced caching to speed up builds
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
