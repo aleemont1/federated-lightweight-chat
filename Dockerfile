@@ -3,8 +3,7 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# Install system dependencies required for building Python packages
-# (e.g. gcc for some libraries, though mostly not needed for pure python)
+# Install system dependencies required for building Python packages.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
@@ -26,21 +25,27 @@ FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 
-# Create a non-root user for security
+# 1. Install Runtime Dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    sqlite3 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Create a non-root user for security
 RUN groupadd -r flcuser && useradd -r -g flcuser flcuser
 
-# Copy virtual environment from builder
+# 3. Copy virtual environment from builder
 COPY --from=builder /app/.venv /app/.venv
 
-# Copy application code
+# 4. Copy application code
 COPY src ./src
-# Copy scripts if needed (e.g. for entrypoint)
+# Copy scripts if needed
 COPY scripts ./scripts
 
-# Set ownership to non-root user
+# 5. Set ownership to non-root user
 RUN chown -R flcuser:flcuser /app
 
-# Switch to non-root user
+# 6. Switch to non-root user
 USER flcuser
 
 # Add venv to PATH
