@@ -43,11 +43,64 @@ class ChatApp {
             }
         };
 
+        // Validate critical DOM presence immediately
         if (!this.dom.views.login || !this.dom.views.chat) {
             console.error("FATAL: Critical DOM elements missing.");
         }
 
+        this._configureMarkdown();
         this.init();
+    }
+
+    /**
+     * Configures Marked.js to use Highlight.js for code blocks.
+     * Includes safety checks to prevent crashes if libraries aren't loaded.
+     */
+    _configureMarkdown() {
+        if (typeof marked === 'undefined') {
+            console.warn("Marked.js not loaded. Markdown rendering disabled.");
+            return;
+        }
+
+        const renderer = {
+            code(tokenOrCode, lang) {
+                let code = tokenOrCode;
+                let language = lang;
+
+                // Handle Marked v12+ token object
+                if (typeof tokenOrCode === 'object' && tokenOrCode !== null) {
+                    code = tokenOrCode.text || '';
+                    language = tokenOrCode.lang || lang; 
+                }
+
+                code = String(code);
+                
+                // Check if Highlight.js is actually available
+                if (typeof hljs !== 'undefined') {
+                    // Safety check for valid language
+                    const validLanguage = (language && hljs.getLanguage(language)) ? language : 'plaintext';
+                    try {
+                        const highlighted = hljs.highlight(code, { language: validLanguage }).value;
+                        return `<pre><code class="hljs language-${validLanguage}">${highlighted}</code></pre>`;
+                    } catch (e) {
+                        console.warn("Highlight.js failed to highlight code block:", e);
+                    }
+                }
+                
+                // Fallback if hljs is missing or fails
+                return `<pre><code class="hljs">${code}</code></pre>`;
+            }
+        };
+
+        try {
+            marked.use({
+                breaks: true,
+                gfm: true,
+                renderer: renderer
+            });
+        } catch (e) {
+            console.error("Failed to configure Marked.js:", e);
+        }
     }
 
     init() {
@@ -61,8 +114,15 @@ class ChatApp {
         if (this.dom.views.overlay) this.dom.views.overlay.addEventListener('click', () => this.toggleSidebar(false));
 
         if (this.dom.inputs.message) {
+            this.dom.inputs.message.addEventListener('input', () => this.adjustTextareaHeight());
+            
             this.dom.inputs.message.addEventListener('keypress', (e) => {
-                if (e.key === 'Enter') this.handleSendMessage();
+                const isDesktop = window.innerWidth >= 768;
+                
+                if (isDesktop && e.key === 'Enter' && !e.shiftKey) { 
+                    e.preventDefault(); 
+                    this.handleSendMessage();
+                }
             });
         }
         if (this.dom.inputs.newRoom) {
@@ -80,8 +140,13 @@ class ChatApp {
 
         this.checkHealth();
     }
-    
-    // ... (checkHealth, handleLogin, handleLogout, transitionToChat, handleCreateRoom, connectWebSocket, disconnectWebSocket, appendMessage, renderRoomList, toggleSidebar, updateStatus, scrollToBottom, escapeHtml remain same or are simple enough to infer)
+
+    adjustTextareaHeight() {
+        const el = this.dom.inputs.message;
+        if (!el) return;
+        el.style.height = 'auto'; 
+        el.style.height = (el.scrollHeight) + 'px';
+    }
 
     async checkHealth() {
         try {
@@ -156,20 +221,17 @@ class ChatApp {
         }
 
         this.disconnectWebSocket();
-        
-        // --- NEW: Active Pull Sync ---
         try {
             console.log(`Syncing room ${roomId}...`);
             await this.api.syncRoom(roomId);
         } catch (e) {
             console.warn("Sync failed (likely network or peer issue), falling back to local history", e);
         }
-        // -----------------------------
 
         await this.loadHistory();
         this.connectWebSocket();
     }
-    
+
     async handleSendMessage() {
         if (!this.dom.inputs.message) return;
         const content = this.dom.inputs.message.value.trim();
@@ -177,6 +239,7 @@ class ChatApp {
         try {
             await this.api.sendMessage(this.state.currentRoom, content);
             this.dom.inputs.message.value = '';
+            this.adjustTextareaHeight();
         } catch (e) { console.error('Send failed', e); }
     }
 
@@ -189,10 +252,22 @@ class ChatApp {
             container.innerHTML = '';
             if (messages.length === 0) container.innerHTML = '<div class="text-center text-gray-400 mt-4 text-sm">No messages yet.</div>';
             else {
-                messages.forEach(msg => this.appendMessage(msg));
+                // FIXED: Wrapped in individual try-catch to prevent one bad message from hiding all history
+                messages.forEach(msg => {
+                    try {
+                        this.appendMessage(msg);
+                    } catch (err) {
+                        console.error("Failed to render message:", msg, err);
+                        // Fallback render attempt
+                        this.appendMessage({ ...msg, content: "⚠️ Error rendering message" });
+                    }
+                });
                 this.scrollToBottom();
             }
-        } catch (e) { container.innerHTML = '<div class="text-center text-red-400 mt-4">Failed to load history</div>'; }
+        } catch (e) { 
+            console.error("History load error:", e);
+            container.innerHTML = '<div class="text-center text-red-400 mt-4">Failed to load history</div>'; 
+        }
     }
 
     connectWebSocket() {
@@ -223,26 +298,91 @@ class ChatApp {
 
     appendMessage(msg) {
         if (msg.room_id !== this.state.currentRoom) return;
+        
         const container = this.dom.containers.messages;
         if (!container) return;
-        if (container.firstElementChild && container.firstElementChild.innerText.includes('No messages')) container.innerHTML = '';
+        if (container.firstElementChild && container.firstElementChild.innerText.includes('No messages')) {
+            container.innerHTML = '';
+        }
         
         const isOwn = this.state.user && msg.sender_id === this.state.user.username;
-        const div = document.createElement('div');
-        div.className = `flex flex-col max-w-[85%] ${isOwn ? 'self-end items-end' : 'self-start items-start'}`;
-        const bubbleColor = isOwn ? 'bg-primary text-white rounded-br-none' : 'bg-white border border-gray-200 text-gray-800 rounded-bl-none';
         const time = new Date(msg.created_at * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+
+        const div = document.createElement('div');
+        div.className = `flex flex-col max-w-[70%] ${isOwn ? 'self-end items-end' : 'self-start items-start'}`;
+        
+        const bubbleColor = isOwn 
+            ? 'bg-primary text-white rounded-br-none' 
+            : 'bg-white border border-gray-200 text-gray-800 rounded-bl-none';
+
+        // FIXED: Robust rendering handling
+        let contentHtml;
+        try {
+            contentHtml = this._formatMessageContent(msg.content);
+        } catch (e) {
+            console.warn("Markdown rendering failed, falling back to text", e);
+            contentHtml = this._safeEscape(msg.content);
+        }
+
         div.innerHTML = `
-            <div class="px-4 py-2 rounded-2xl shadow-sm ${bubbleColor}">
-                <div class="text-sm break-words">${this.escapeHtml(msg.content)}</div>
+            <div class="px-4 py-2 rounded-2xl shadow-sm ${bubbleColor} min-w-0 prose">
+                ${contentHtml}
             </div>
             <div class="flex items-center gap-1 mt-1 px-1">
-                <span class="text-[10px] text-gray-400 font-medium">${msg.sender_id}</span>
+                <span class="text-[10px] text-gray-400 font-medium">${this._safeEscape(msg.sender_id)}</span>
                 <span class="text-[10px] text-gray-300">•</span>
                 <span class="text-[10px] text-gray-400">${time}</span>
             </div>
         `;
+        
         container.appendChild(div);
+    }
+
+    _formatMessageContent(text) {
+        if (!text) return "";
+        const MAX_CHARS = 300;
+        
+        const isTruncated = text.length > MAX_CHARS;
+        const shortText = isTruncated ? text.substring(0, MAX_CHARS) : text;
+
+        const htmlFull = this._renderMarkdown(text);
+        
+        if (!isTruncated) {
+            return htmlFull;
+        }
+
+        const htmlShort = this._renderMarkdown(shortText);
+
+        const id = `msg-${Date.now()}-${Math.floor(Math.random()*1000)}`;
+        return `
+            <span id="${id}-short">
+                ${htmlShort}...<button onclick="document.getElementById('${id}-short').classList.add('hidden'); document.getElementById('${id}-full').classList.remove('hidden');" 
+                    class="inline text-xs font-bold underline ml-1 cursor-pointer opacity-60 hover:opacity-100 align-baseline">Read more</button>
+            </span>
+            <span id="${id}-full" class="hidden">
+                ${htmlFull}<button onclick="document.getElementById('${id}-full').classList.add('hidden'); document.getElementById('${id}-short').classList.remove('hidden');" 
+                    class="inline text-xs font-bold underline ml-1 cursor-pointer opacity-60 hover:opacity-100 align-baseline">Show less</button>
+            </span>
+        `;
+    }
+
+    _renderMarkdown(text) {
+        if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
+            return this._safeEscape(text);
+        }
+        try {
+            const rawHtml = marked.parse(text);
+            return DOMPurify.sanitize(rawHtml, { ADD_ATTR: ['class'] });
+        } catch (e) {
+            console.warn("Marked.parse failed:", e);
+            return this._safeEscape(text);
+        }
+    }
+
+    _safeEscape(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
     }
 
     renderRoomList() {
@@ -289,12 +429,6 @@ class ChatApp {
 
     scrollToBottom() {
         if (this.dom.containers.messages) this.dom.containers.messages.scrollTop = this.dom.containers.messages.scrollHeight;
-    }
-
-    escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
     }
 }
 

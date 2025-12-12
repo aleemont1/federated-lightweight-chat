@@ -5,6 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Federated Lightweight Chat</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
+    
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+
     <script>
         tailwind.config = {
             theme: {
@@ -23,13 +31,66 @@
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
         ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
         .hidden { display: none !important; }
+
+        /* --- Message Bubble Typography (Prose) --- */
+        .prose {
+            width: 100%;
+            overflow-wrap: anywhere;
+            word-break: break-word; 
+            font-size: 0.875rem;
+            line-height: 1.625;
+        }
+        
+        .prose p { margin-bottom: 0.25rem; }
+        .prose p:last-child { margin-bottom: 0; }
+
+        /* Code Blocks */
+        .prose pre { 
+            /* Theme (atom-one-dark) will handle background color */
+            margin: 0.5rem 0;
+            border-radius: 0.5rem; 
+            
+            /* Scrolling Logic */
+            overflow-x: auto; 
+            white-space: pre; 
+            max-width: 100%;
+            
+            /* Font */
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        }
+        
+        /* Ensure the code block inside pre has padding (handled by hljs class usually, but reinforcing) */
+        .prose pre code.hljs {
+            padding: 0.75rem;
+            background-color: #282c34; /* Match atom-one-dark if CSS fails to load or for consistency */
+            display: block;
+        }
+
+        /* Inline Code */
+        .prose :not(pre) > code {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            background: rgba(0, 0, 0, 0.15); /* Slightly darker for visibility */
+            padding: 0.125rem 0.375rem; 
+            border-radius: 0.25rem; 
+            font-size: 0.9em;
+        }
+
+        .prose blockquote { 
+            border-left: 3px solid rgba(0, 0, 0, 0.3); 
+            padding-left: 0.75rem; 
+            font-style: italic; 
+            margin: 0.5rem 0;
+        }
+        
+        .prose ul { list-style-type: disc; padding-left: 1.5rem; }
+        .prose ol { list-style-type: decimal; padding-left: 1.5rem; }
+        .prose a { text-decoration: underline; opacity: 0.9; }
     </style>
 </head>
 <body class="bg-gray-100 text-slate-800 h-screen flex items-center justify-center overflow-hidden">
 
-    <div id="app" class="w-full h-full md:h-[90vh] md:max-w-6xl bg-white shadow-2xl rounded-xl overflow-hidden relative">
+    <div id="app" class="w-full h-full md:h-[90vh] md:max-w-[95%] bg-white shadow-2xl rounded-xl overflow-hidden relative">
         
-        <!-- Login View -->
         <div id="login-view" class="absolute inset-0 z-50 bg-gray-50 flex flex-col items-center justify-center p-4">
             <div class="bg-white p-8 rounded-xl shadow-lg w-full max-w-md text-center">
                 <h1 class="text-3xl font-bold text-primary mb-2">FLC</h1>
@@ -46,15 +107,11 @@
             </div>
         </div>
 
-        <!-- Chat View Wrapper -->
         <div id="chat-view" class="flex w-full h-full hidden">
             
-            <!-- Sidebar -->
-            <!-- Removed 'hidden md:flex': Visibility now managed by JS for full toggle control -->
             <aside id="chat-sidebar" class="w-64 bg-slate-50 border-r border-gray-200 flex flex-col h-full z-20 absolute md:relative hidden">
                 <div class="p-4 border-b border-gray-200 bg-white flex justify-between items-center h-16">
                     <h2 class="font-bold text-lg text-slate-700">Rooms</h2>
-                    <!-- Close button (visible only on mobile overlay mode usually, but logic handles it) -->
                     <button id="close-sidebar-btn" class="md:hidden text-gray-500 hover:text-red-500">
                         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                     </button>
@@ -85,12 +142,9 @@
                 </div>
             </aside>
 
-            <!-- Main Chat Area -->
             <main class="flex-1 flex flex-col h-full w-full relative bg-white min-w-0">
-                <!-- Header -->
                 <header class="bg-white p-3 border-b border-gray-100 flex justify-between items-center shadow-sm h-16">
                     <div class="flex items-center gap-3">
-                        <!-- Toggle Button (Always visible now) -->
                         <button id="mobile-menu-btn" class="text-gray-500 hover:text-primary p-1 rounded hover:bg-gray-100 transition">
                             <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
                         </button>
@@ -103,15 +157,15 @@
                     </div>
                 </header>
 
-                <div id="message-list" class="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50 scroll-smooth"></div>
+                <div id="message-list" class="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50 scroll-smooth flex flex-col"></div>
 
                 <footer class="p-4 bg-white border-t border-gray-100">
-                    <div class="flex gap-2 items-center bg-gray-50 p-1.5 rounded-xl border border-gray-200 focus-within:border-primary focus-within:ring-1 focus-within:ring-primary transition">
-                        <input type="text" id="message-input" 
-                            class="flex-1 min-w-0 bg-transparent px-3 py-2 outline-none text-gray-700 placeholder-gray-400"
-                            placeholder="Type a message..." autocomplete="off" />
+                    <div class="flex gap-2 items-end bg-gray-50 p-2 rounded-xl border border-gray-200 focus-within:border-primary focus-within:ring-1 focus-within:ring-primary transition">
+                        <textarea id="message-input" rows="1"
+                            class="flex-1 min-w-0 bg-transparent px-3 py-2 outline-none text-gray-700 placeholder-gray-400 resize-none max-h-32 overflow-y-auto leading-6 scrollbar-hide"
+                            placeholder="Type a message..."></textarea>
                         <button id="send-btn" 
-                            class="bg-primary hover:bg-blue-600 text-white p-2 rounded-lg transition transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0">
+                            class="bg-primary hover:bg-blue-600 text-white p-2 rounded-lg transition transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0 h-10 w-10 flex items-center justify-center mb-[1px]">
                             <svg class="w-5 h-5 rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
                         </button>
                     </div>
