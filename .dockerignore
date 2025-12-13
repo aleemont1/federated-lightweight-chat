@@ -1,0 +1,24 @@
+# .dockerignore
+
+# Ignora dati persistenti e volumi (Risolve il permission denied)
+docker_data/
+.venv/
+venv/
+env/
+
+# Ignora git
+.git/
+.gitignore
+
+# Ignora cache e file temporanei
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.db
+*.sqlite3
+
+# Ignora log e file di sistema
+*.log
+.DS_Store
