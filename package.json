@@ -1,0 +1,12 @@
+{
+  "name": "flc-frontend",
+  "version": "1.0.0",
+  "description": "Frontend build for FLC",
+  "scripts": {
+    "build": "tailwindcss -i ./src/static/css/input.css -o ./src/static/css/styles.css --minify"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.1",
+    "@tailwindcss/typography": "^0.5.10" 
+  }
+}

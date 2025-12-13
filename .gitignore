@@ -9,10 +9,17 @@ env/
 venv/
 ENV/
 
+# --- Node.js Dependencies (NUOVO) ---
+node_modules/
+npm-debug.log
+
 # --- Distribution / Build ---
 build/
 dist/
 *.egg-info/
+
+# --- Generated Assets (Opzionale) ---
+# src/static/css/styles.css
 
 # --- Testing & Coverage ---
 .coverage
@@ -36,4 +43,3 @@ logs/
 
 # --- Docker ---
 docker_data/
-

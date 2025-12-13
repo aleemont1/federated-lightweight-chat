@@ -7,7 +7,7 @@ authors = [
 ]
 license = {text = "MIT"}
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 # Main runtime dependencies
 dependencies = [
     "fastapi (>=0.109.0)",
@@ -41,14 +41,15 @@ watchdog = "^4.0.0"
 
 [tool.black]
 line-length = 110
-target-version = ['py311']
+# UPDATED: Target version for Black formatting
+target-version = ['py312']
 
 [tool.isort]
 profile = "black"
 line_length = 110
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 ignore_missing_imports = true
 disallow_untyped_defs = true
