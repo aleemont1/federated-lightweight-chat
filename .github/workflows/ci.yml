@@ -14,22 +14,22 @@ jobs:
   quality-check:
     name: Static Analysis & Security
     runs-on: ubuntu-latest
-    timeout-minutes: 10 # Safety limit
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      # Setup Python 3.12
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install Poetry
         run: |
           curl -sSL https://install.python-poetry.org | python3 -
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      # Optimization: Cache Poetry dependencies to speed up runs
       - name: Cache Poetry venv
         uses: actions/cache@v3
         with:
@@ -39,7 +39,10 @@ jobs:
             ${{ runner.os }}-poetry-
 
       - name: Install Dependencies
-        run: poetry install --no-interaction --no-root --with dev
+        # FIX: Forziamo Poetry a usare Python 3.12 per il virtualenv
+        run: |
+          poetry env use 3.12
+          poetry install --no-interaction --no-root --with dev
 
       # --- QUALITY GATES ---
       - name: Check Formatting (Black)
@@ -55,7 +58,6 @@ jobs:
         run: poetry run flake8 src tests
 
       - name: Security Scan (Bandit)
-        # Recursive scan, excluding tests from security alerts
         run: poetry run bandit -r src -c pyproject.toml
 
   unit-tests:
@@ -67,10 +69,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install Poetry
         run: |
@@ -84,9 +86,11 @@ jobs:
           key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
 
       - name: Install Dependencies
-        run: poetry install --no-interaction --no-root --with dev
+        # FIX: Forziamo Poetry a usare Python 3.12 anche qui
+        run: |
+          poetry env use 3.12
+          poetry install --no-interaction --no-root --with dev
 
       # Test Execution
       - name: Run Pytest with Coverage
-        # Explicitly fails if coverage is under 80%
         run: poetry run pytest -vv --cov=src --cov-report=term-missing --cov-fail-under=80

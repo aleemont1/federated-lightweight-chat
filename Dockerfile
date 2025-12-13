@@ -1,66 +1,108 @@
-# --- Stage 1: Builder ---
-FROM python:3.11-slim AS builder
+# syntax=docker/dockerfile:1
+
+# ==========================================
+# Stage 1: Frontend Builder (Node.js)
+# ==========================================
+FROM node:24-bookworm-slim AS frontend-builder
 
 WORKDIR /app
 
-# Install system dependencies required for building Python packages.
+# Copia i file di dipendenza
+COPY package*.json ./
+
+# Usa npm install per ora (manca package-lock.json nel repo)
+RUN npm install
+
+# Copia i sorgenti e compila il CSS
+COPY tailwind.config.js ./
+COPY src ./src
+RUN mkdir -p src/static/css
+RUN npm run build
+
+# ==========================================
+# Stage 2: Python Builder (Dependency Compilation)
+# ==========================================
+FROM python:3.12-slim-bookworm AS builder
+
+WORKDIR /app
+
+# Variabili ambiente per pip
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Dipendenze di sistema per la build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Poetry
+# Installazione Poetry e Plugin Export (FIX per errore export)
 RUN curl -sSL https://install.python-poetry.org | python3 -
 ENV PATH="/root/.local/bin:$PATH"
+RUN poetry self add poetry-plugin-export
 
-# Copy only dependency files to cache them
 COPY pyproject.toml poetry.lock README.md ./
 
-# Configure poetry to create venv in the project folder and install prod deps
-RUN poetry config virtualenvs.in-project true \
-    && poetry install --no-root --only main --no-interaction --no-ansi
+# Esportazione requirements.txt standard
+RUN poetry export -f requirements.txt --output requirements.txt --without-hashes
 
-# --- Stage 2: Final Runtime ---
-FROM python:3.11-slim AS runtime
+# --- FIX CRITICO: Creazione Virtualenv ---
+# Invece di --target, creiamo un venv completo.
+# Questo garantisce che 'bin/uvicorn' venga generato correttamente.
+RUN python -m venv /app/venv
+
+# Installazione dipendenze nel venv
+RUN /app/venv/bin/pip install -r requirements.txt
+
+# ==========================================
+# Stage 3: Final Runtime (Hardened)
+# ==========================================
+FROM python:3.12-slim-bookworm AS runtime
+
+# Installazione Tini
+ENV TINI_VERSION v0.19.0
+ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini /tini
+RUN chmod +x /tini
 
 WORKDIR /app
 
-# 1. Install Runtime Dependencies
+# Dipendenze runtime minime (sqlite3, curl per healthcheck)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     sqlite3 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Create a non-root user for security
+# Creazione utente non-root
 RUN groupadd -r flcuser && useradd -r -g flcuser flcuser
 
-# 3. Copy virtual environment from builder
-COPY --from=builder /app/.venv /app/.venv
+# --- FIX CRITICO: Copia del Virtualenv ---
+# Copiamo l'intero ambiente virtuale dal builder
+COPY --from=builder /app/venv /app/venv
 
-# 4. Copy application code
+# Aggiungiamo il bin del venv al PATH di sistema
+# Così 'uvicorn' viene trovato immediatamente senza path assoluti
+ENV PATH="/app/venv/bin:$PATH"
+
+# Copia codice applicativo e asset statici
 COPY src ./src
-# Copy scripts if needed
 COPY scripts ./scripts
+COPY --from=frontend-builder /app/src/static/css/styles.css /app/src/static/css/styles.css
 
-# 5. Set ownership to non-root user
+# Permessi
 RUN chown -R flcuser:flcuser /app
 
-# 6. Switch to non-root user
 USER flcuser
 
-# Add venv to PATH
-ENV PATH="/app/.venv/bin:$PATH"
-
-# Environment variables optimization
+# Ottimizzazioni Python
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Expose port (documentary)
 EXPOSE 8000
 
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:8000/api/health || exit 1
 
-# Entrypoint
+# Entrypoint e Cmd
+ENTRYPOINT ["/tini", "--"]
 CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
