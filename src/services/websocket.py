@@ -87,10 +87,10 @@ class ConnectionManager:
             pubsub = redis_client.pubsub()
             channel = f"chat:{room_id}"
 
-            await pubsub.subscribe(channel)
-            logger.info("Subscribed to Redis channel: %s", channel)
-
             try:
+                await pubsub.subscribe(channel)
+                logger.info("Subscribed to Redis channel: %s", channel)
+
                 async for message in pubsub.listen():
                     if message["type"] == "message":
                         try:
