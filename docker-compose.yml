@@ -14,15 +14,11 @@ x-node-defaults: &node-defaults
     init-perms:
       condition: service_completed_successfully
     redis:
-      condition: service_started
+      condition: service_healthy
 
 services:
-  # Infrastructure
-  # Handles permissions for BOTH Shared (SQLite) and Redis folders
   init-perms:
     image: busybox
-    # Mount the folders to /shared and /redis inside this helper container
-    # and ensure they are writable (777) so the specific containers can write to them.
     command: sh -c "mkdir -p /shared /redis && chmod 777 /shared /redis"
     volumes:
       - ./docker_data/shared:/shared
@@ -30,11 +26,10 @@ services:
     networks:
       - flc-net
 
+  # Cache / PubSub Layer
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-bookworm
     container_name: flc-redis
-    # Explicit command to enable append-only persistence
-    # and bind to all interfaces for container networking.
     command: redis-server --appendonly yes --bind 0.0.0.0
     ports:
       - "6379:6379"
@@ -48,7 +43,7 @@ services:
     networks:
       - flc-net
 
-  # App Nodes
+  # Application Nodes
   node-0:
     <<: *node-defaults
     container_name: flc-node-0
@@ -76,16 +71,14 @@ services:
       - ADVERTISED_ADDR=http://flc-node-1:8000
       - DB_NAME=/data/user_1.db
       - REDIS_URL=redis://flc-redis:6379
-    # Manual dependency merge to ensure ring order startup
     depends_on:
       init-perms:
         condition: service_completed_successfully
       redis:
-        condition: service_started
+        condition: service_healthy
       node-0:
-        condition: service_started
+        condition: service_healthy
 
-  # Node 2
   node-2:
     <<: *node-defaults
     container_name: flc-node-2
@@ -100,7 +93,6 @@ services:
       - DB_NAME=/data/user_2.db
       - REDIS_URL=redis://flc-redis:6379
 
-  # Node 3
   node-3:
     <<: *node-defaults
     container_name: flc-node-3
@@ -115,7 +107,6 @@ services:
       - DB_NAME=/data/user_3.db
       - REDIS_URL=redis://flc-redis:6379
 
-  # Node 4
   node-4:
     <<: *node-defaults
     container_name: flc-node-4
@@ -130,7 +121,6 @@ services:
       - DB_NAME=/data/user_4.db
       - REDIS_URL=redis://flc-redis:6379
 
-  # Node 5
   node-5:
     <<: *node-defaults
     container_name: flc-node-5
@@ -145,7 +135,6 @@ services:
       - DB_NAME=/data/user_5.db
       - REDIS_URL=redis://flc-redis:6379
 
-  # Node 6
   node-6:
     <<: *node-defaults
     container_name: flc-node-6
@@ -160,7 +149,6 @@ services:
       - DB_NAME=/data/user_6.db
       - REDIS_URL=redis://flc-redis:6379
 
-  # Node 7
   node-7:
     <<: *node-defaults
     container_name: flc-node-7
@@ -175,7 +163,6 @@ services:
       - DB_NAME=/data/user_7.db
       - REDIS_URL=redis://flc-redis:6379
 
-  # Node 8
   node-8:
     <<: *node-defaults
     container_name: flc-node-8
@@ -190,7 +177,6 @@ services:
       - DB_NAME=/data/user_8.db
       - REDIS_URL=redis://flc-redis:6379
 
-  # Node 9 (Closes the ring)
   node-9:
     <<: *node-defaults
     container_name: flc-node-9
