@@ -18,11 +18,27 @@ def mock_storage():
 
 
 @pytest.fixture
-def gossip_service(mock_storage):
-    """Returns gossip service"""
-    return GossipService(
-        storage=mock_storage, node_id="test_node", node_addr="http://me:8000", peers=["http://peer:8000"]
-    )
+def mock_redis():
+    """Fixture that provides a mocked Redis client."""
+    mock = AsyncMock()
+    mock.keys.return_value = []
+    mock.get.return_value = None
+    mock.set = AsyncMock()
+    mock.delete = AsyncMock()
+    return mock
+
+
+@pytest.fixture
+def gossip_service(mock_storage, mock_redis):
+    """Returns gossip service with mocked Redis."""
+    with patch("src.services.gossip.redis.from_url", return_value=mock_redis):
+        with patch("os.getenv", return_value="redis://localhost:6379"):
+            return GossipService(
+                storage=mock_storage,
+                node_id="test_node",
+                node_addr="http://me:8000",
+                peers=[],  # Legacy list
+            )
 
 
 @pytest.mark.asyncio
@@ -39,6 +55,9 @@ async def test_sync_room_messages_success(gossip_service, mock_storage):
         "vector_clock": {},
         "created_at": 100.0,
     }
+
+    # Mock get_active_peers to return a peer so logic proceeds
+    gossip_service.get_active_peers = AsyncMock(return_value=["http://peer:8000"])
 
     # Mock HTTP Client response
     with patch("httpx.AsyncClient") as mock_client_cls:
@@ -81,6 +100,9 @@ async def test_sync_room_messages_idempotency(gossip_service, mock_storage):
         "vector_clock": {},
         "created_at": 100,
     }
+
+    # Mock get_active_peers to return a peer so logic proceeds
+    gossip_service.get_active_peers = AsyncMock(return_value=["http://peer:8000"])
 
     with patch("httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()
