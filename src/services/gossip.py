@@ -4,9 +4,12 @@ Handles background syncing between nodes
 
 import asyncio
 import logging
+import os
 import secrets
+from typing import List
 
 import httpx
+import redis.asyncio as redis
 
 from src.core.message import Message
 from src.services.storage import StorageService
@@ -19,39 +22,67 @@ class GossipService:
     """Background sync service"""
 
     def __init__(self, storage: StorageService, node_id: str, node_addr: str, peers: list[str]):
+        # 'peers' arg is kept for backward compat, but we mostly ignore it now in favor of Redis
         self.storage = storage
         self.node_id = node_id
         self.node_addr = node_addr
-        self.peers = peers
         self._running = False
 
-    async def start(self) -> None:
-        """Start node sync"""
+        # Redis connection for Discovery
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+        self.redis = redis.from_url(redis_url, decode_responses=True)  # type: ignore[no-untyped-call]
 
+    async def register_self(self) -> None:
+        """Registers this node in the central Redis registry."""
+        key = f"discovery:node:{self.node_id}"
+        # Set with expiration (TTL) acting as a heartbeat
+        await self.redis.set(key, self.node_addr, ex=10)
+
+    async def get_active_peers(self) -> List[str]:
+        """Fetches active peers from Redis."""
+        keys = await self.redis.keys("discovery:node:*")
+        peers = []
+        for key in keys:
+            # Don't gossip with self
+            if key == f"discovery:node:{self.node_id}":
+                continue
+            addr = await self.redis.get(key)
+            if addr:
+                peers.append(addr)
+        return peers
+
+    async def start(self) -> None:
+        """Start node sync and heartbeat loop"""
         self._running = True
-        logger.info("[%s] Started syncing. Initial peers: %s", self.node_id, self.peers)
+        logger.info("[%s] Gossip/Discovery service started.", self.node_id)
 
         try:
-            # Initial warmup delay
-            await asyncio.sleep(3)
-
             while self._running:
                 try:
-                    if self.peers:
-                        # Choose a random peer to sync with
-                        target = secrets.choice(self.peers)
-                        if target != self.node_addr:
-                            await self._push_data(target)
-                # pylint: disable=broad-exception-caught
-                except Exception as e:
-                    logger.error("Gossip error: %s", e)
+                    # 1. Heartbeat: I am alive
+                    await self.register_self()
 
-                await asyncio.sleep(2)
+                    # 2. Discover Peers
+                    dynamic_peers = await self.get_active_peers()
+
+                    if dynamic_peers:
+                        # 3. Gossip: Push data to a random peer
+                        target = secrets.choice(dynamic_peers)
+                        await self._push_data(target)
+
+                except Exception as e:
+                    logger.error("Gossip loop error: %s", e)
+
+                await asyncio.sleep(2)  # Beat every 2 seconds
 
         finally:
-            # Ensure the flag is reset to False when the task stops, crashes, or is cancelled.
-            logger.info("[%s] Gossip loop terminated.", self.node_id)
             self._running = False
+            # Cleanup self from discovery
+            try:
+                await self.redis.delete(f"discovery:node:{self.node_id}")
+            except Exception as e:
+                logger.warning("Failed to cleanup discovery key during shutdown: %s", e)
+            logger.info("Gossip service stopped.")
 
     def stop(self) -> None:
         """
@@ -66,12 +97,15 @@ class GossipService:
         Actively pulls messages for a specific room from random peers.
         This is an 'Anti-Entropy' pull mechanism triggered by user actions (joining a room).
         """
-        if not self.peers:
+        # FIX: Await the async call to get the actual list
+        active_peers = await self.get_active_peers()
+
+        if not active_peers:
             return
 
         # Try up to 3 random peers to spread load and increase chance of finding data
         # We use SystemRandom to ensure cryptographic randomness is not needed but good practice
-        targets = secrets.SystemRandom().sample(self.peers, min(len(self.peers), 3))
+        targets = secrets.SystemRandom().sample(active_peers, min(len(active_peers), 3))
 
         async with httpx.AsyncClient(timeout=3.0) as client:
             for target in targets:
@@ -120,9 +154,9 @@ class GossipService:
         if not msgs:
             return
 
-        # Ensure we don't double-slash if target has trailing slash
+        # Ensure valid URL format
         base_url = target.rstrip("/")
-        # FIX: The API router is mounted at /api, so the endpoint is /api/replication
+        # Traefik internal routing or direct IP routing
         replication_url = f"{base_url}/api/replication"
 
         async with httpx.AsyncClient(timeout=1.0) as client:
