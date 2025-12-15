@@ -4,6 +4,8 @@ nodes' local persistence.
 """
 
 import json
+import logging
+import os
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -11,16 +13,48 @@ from typing import Iterator, List, Optional
 
 from src.core.message import Message, VectorClock
 
+# Configure module logger
+logger = logging.getLogger(__name__)
+
 
 class StorageService:
     """Handles local storage in nodes for persistence."""
 
     def __init__(self, db_name: str):
+        """
+        Initialize the StorageService.
+
+        Args:
+            db_name: The file path to the SQLite database.
+        """
         self.db_name = db_name
+        self._ensure_directory_exists()
         self._init_db()
+
+    def _ensure_directory_exists(self) -> None:
+        """
+        Internal method to verify the parent directory exists.
+        Creates it recursively if it is missing.
+        """
+        directory = os.path.dirname(self.db_name)
+
+        # If db_name is just "file.db", directory is empty string; no action needed.
+        if directory and not os.path.exists(directory):
+            try:
+                logger.info("Database directory %s not found. Creating it...", directory)
+                os.makedirs(directory, exist_ok=True)
+            except OSError as e:
+                logger.error("Failed to create database directory %s: %s", directory, e)
+                # Re-raise to prevent application starting in an unstable state
+                raise
 
     @contextmanager
     def _get_conn(self) -> Iterator[sqlite3.Connection]:
+        """
+        Context manager for database connections.
+        Ensures proper closure and foreign key enforcement.
+        """
+        # Connect to the DB. This will fail if the directory doesn't exist/isn't writable.
         conn = sqlite3.connect(self.db_name)
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.row_factory = sqlite3.Row
@@ -30,6 +64,7 @@ class StorageService:
             conn.close()
 
     def _init_db(self) -> None:
+        """Initializes the database schema."""
         with self._get_conn() as conn:
             cursor = conn.cursor()
 
@@ -88,7 +123,6 @@ class StorageService:
         Checks if a message exists.
         Used for idempotency during replication
         """
-
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute(
