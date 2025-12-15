@@ -26,7 +26,7 @@ class OrchestratorService:
     Spawns, monitors and kills user node containers.
     """
 
-    def __init__(self, max_users: int = 10, network_name: str = "flc_net"):
+    def __init__(self, max_users: int = 10, network_name: str = "flc-net"):
         self.max_users = max_users
         self.network_name = network_name
         self._client = docker.from_env()
@@ -65,19 +65,24 @@ class OrchestratorService:
 
         image_name = "flc-node:latest"
 
+        # Traefik configuration labels
         labels = {
             "app": "flc-node",
             "traefik.enable": "true",
-            # Traefik Router Config: Route 'alice.localhost' to this container
             f"traefik.http.routers.{safe_name}.rule": f"Host(`{safe_name}.localhost`)",
             f"traefik.http.routers.{safe_name}.entrypoints": "web",
             f"traefik.http.services.{safe_name}.loadbalancer.server.port": "8000",
         }
 
+        # Inject ADVERTISED_ADDR so other nodes can reach this one.
+        # Inside the docker network, the container is reachable by its container name.
+        internal_address = f"http://{container_name}:8000"
+
         env = {
             "NODE_ID": safe_name,
             "REDIS_URL": "redis://flc-redis:6379",
             "DB_NAME": f"/data/{safe_name}.db",
+            "ADVERTISED_ADDR": internal_address,
         }
 
         try:
