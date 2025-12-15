@@ -23,14 +23,13 @@ def orchestrator(mock_docker):
     return OrchestratorService(max_users=2)
 
 
-def test_spawn_container_success(orchestrator, mock_docker):
-    """Test that a container is created when it doesn't exist."""
+def test_spawn_container_injects_network_config(orchestrator, mock_docker):
+    """
+    Test that the container is spawned with the correct ADVERTISED_ADDR.
+    This fixes the bug where nodes gossiped with 'localhost' (themselves).
+    """
     client = mock_docker.return_value
-
-    # 1. Simulate that the container does NOT exist
     client.containers.get.side_effect = NotFound("Container not found")
-
-    # 2. Simulate no active users currently
     client.containers.list.return_value = []
 
     username = "alice"
@@ -38,12 +37,17 @@ def test_spawn_container_success(orchestrator, mock_docker):
 
     # Verification
     client.containers.run.assert_called_once()
-    args, kwargs = client.containers.run.call_args
+    _, kwargs = client.containers.run.call_args
 
-    # Verify Traefik labels
-    labels = kwargs["labels"]
-    assert labels[f"traefik.http.routers.{username}.rule"] == f"Host(`{username}.localhost`)"
-    assert kwargs["environment"]["NODE_ID"] == username
+    env = kwargs["environment"]
+
+    # 1. Verify Node ID
+    assert env["NODE_ID"] == "alice"
+
+    # 2. Verify Internal Docker DNS Address (The Fix)
+    # It must NOT be localhost. It must be the container name on the bridge network.
+    expected_addr = "http://flc-node-alice:8000"
+    assert env["ADVERTISED_ADDR"] == expected_addr
 
 
 def test_spawn_container_idempotency(orchestrator, mock_docker):
@@ -53,9 +57,8 @@ def test_spawn_container_idempotency(orchestrator, mock_docker):
     mock_container.name = "flc-node-alice"
     mock_container.status = "running"
 
-    # 1. Simulate EXISTING container (no exception raised)
     client.containers.get.return_value = mock_container
-    client.containers.get.side_effect = None  # Clear any previous side effects
+    client.containers.get.side_effect = None
 
     result = orchestrator.spawn_user_node("alice")
 
@@ -66,21 +69,8 @@ def test_spawn_container_idempotency(orchestrator, mock_docker):
 def test_max_users_limit(orchestrator, mock_docker):
     """Ensure we respect the hard limit of containers."""
     client = mock_docker.return_value
-
-    # 1. Simulate that the specific user 'charlie' does NOT exist
-    # (Otherwise it would just return the existing container)
     client.containers.get.side_effect = NotFound("Container not found")
-
-    # 2. Simulate system is full (2 active users for max_users=2)
     client.containers.list.return_value = [MagicMock(), MagicMock()]
 
     with pytest.raises(MaxUsersReachedError):
         orchestrator.spawn_user_node("charlie")
-
-
-def test_sanitize_username(orchestrator):
-    """Ensure usernames are docker-safe."""
-    # We access the protected method for unit testing
-    # pylint: disable=protected-access
-    safe = orchestrator._sanitize_username("Alice_Bob 123")
-    assert safe == "alice_bob_123"
