@@ -20,7 +20,7 @@ from src.services.storage import StorageService
 def make_node(tmp_path, name):
     """A replica with its own DB and clock; ingest mimics NodeService.ingest."""
     storage = StorageService(str(tmp_path / f"{name}.db"))
-    state = NodeState(name, {})
+    state = NodeState(name, {}, writer_id=storage.writer_id(name))
 
     async def ingest(msg: Message) -> bool:
         if not storage.add_message(msg):
@@ -34,7 +34,11 @@ def make_node(tmp_path, name):
 def write(storage, state, room, content):
     """Authors a message the way NodeService.send does."""
     msg = Message(
-        room_id=room, sender_id=state.node_id, content=content, vector_clock=state.increment_clock(room)
+        room_id=room,
+        sender_id=state.node_id,
+        writer_id=state.writer_id,
+        content=content,
+        vector_clock=state.increment_clock(room),
     )
     storage.add_message(msg)
     return msg
@@ -68,7 +72,7 @@ async def test_pull_converges_beyond_old_100_message_cap(tmp_path):
         rounds += 1
 
     assert len(b_storage.get_room_messages("bulk", limit=500, offset=0)) == 500
-    assert b_storage.summary() == {"bulk": {"alice": 1200}}
+    assert b_storage.summary() == {"bulk": {a_state.writer_id: 1200}}
     assert rounds == 3  # 500 + 500 + 200
 
 
@@ -80,12 +84,12 @@ async def test_pull_fills_gaps_and_merges_clock(tmp_path):
     msgs = [write(a_storage, a_state, "general", c) for c in ("one", "two", "three")]
     await b_ingest(msgs[0])
     await b_ingest(msgs[2])
-    assert b_storage.summary() == {"general": {"alice": 1}}
+    assert b_storage.summary() == {"general": {a_state.writer_id: 1}}
 
     await gossip_towards(b_storage, b_ingest, a_storage).pull_from("http://alice")
 
     assert [m.content for m in b_storage.get_room_messages("general")] == ["one", "two", "three"]
-    assert b_state.get_clock("general")["alice"] == 3
+    assert b_state.get_clock("general")[a_state.writer_id] == 3
 
 
 @pytest.mark.asyncio
@@ -139,7 +143,7 @@ async def test_drain_catches_up_in_one_call(tmp_path):
     gossip.get_active_peers = AsyncMock(return_value=["http://alice"])  # type: ignore[method-assign]
 
     assert await gossip.sync_once(drain=True) == 1200
-    assert b_storage.summary() == {"bulk": {"alice": 1200}}
+    assert b_storage.summary() == {"bulk": {a_state.writer_id: 1200}}
 
 
 @pytest.mark.asyncio
@@ -187,3 +191,28 @@ async def test_publish_gives_up_on_a_hanging_redis(tmp_path):
     service.redis.publish.side_effect = hang
 
     await asyncio.wait_for(service.publish(write(storage, state, "general", "x")), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_node_that_lost_its_data_is_still_heard(tmp_path):
+    """
+    Regression: alice's DB is lost and no peer is online when she restarts, so she counts from 1
+    again. With the username as writer, her new message reused seq 1 and bob never pulled it.
+    """
+    a_storage, a_state, _ = make_node(tmp_path, "alice")
+    b_storage, _, b_ingest = make_node(tmp_path, "bob")
+    for c in ("one", "two"):
+        write(a_storage, a_state, "general", c)
+    await gossip_towards(b_storage, b_ingest, a_storage).pull_from("http://alice")
+
+    reborn_storage = StorageService(str(tmp_path / "alice-reborn.db"))
+    reborn_state = NodeState("alice", {}, writer_id=reborn_storage.writer_id("alice"))
+    write(reborn_storage, reborn_state, "general", "after the loss")
+    await gossip_towards(b_storage, b_ingest, reborn_storage).pull_from("http://alice")
+
+    # It never saw "one" and "two", so it's concurrent with them: any position is causal.
+    assert sorted(m.content for m in b_storage.get_room_messages("general")) == [
+        "after the loss",
+        "one",
+        "two",
+    ]

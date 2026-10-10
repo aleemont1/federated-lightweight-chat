@@ -6,9 +6,10 @@ nodes' local persistence.
 import json
 import logging
 import os
+import secrets
 import sqlite3
 from contextlib import contextmanager
-from typing import Dict, Iterator, List, Set, Tuple
+from typing import Dict, Iterator, List
 
 from src.core.message import Message, VectorClock
 from src.core.vector_clock import merge
@@ -16,13 +17,13 @@ from src.core.vector_clock import merge
 # Configure module logger
 logger = logging.getLogger(__name__)
 
-# Per room, per sender: the highest sequence number held with no gaps below it.
-# A message's sequence number is its sender's own entry in its vector clock.
+# Per room, per writer: the highest sequence number held with no gaps below it.
+# A message's sequence number is its writer's own entry in its vector clock.
 Summary = Dict[str, Dict[str, int]]
 
 
 def _to_message(row: sqlite3.Row) -> Message:
-    msg_dict = dict(row)
+    msg_dict = {k: row[k] for k in Message.model_fields}
     msg_dict["vector_clock"] = json.loads(msg_dict["vector_clock"])
     return Message(**msg_dict)
 
@@ -56,7 +57,7 @@ class StorageService:
             conn.close()
 
     def _init_db(self) -> None:
-        """Initializes the database schema."""
+        """Creates the schema, or migrates a database from before writer ids."""
         with self._get_conn() as conn:
             conn.execute(
                 """
@@ -66,11 +67,26 @@ class StorageService:
                     sender_id TEXT,
                     content TEXT,
                     vector_clock TEXT,
-                    created_at REAL
+                    created_at REAL,
+                    writer_id TEXT,
+                    seq INTEGER
                     )
                 """
             )
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
+            if "writer_id" not in columns:
+                # Before writer ids the sender was the writer, and its clock entry the seq.
+                conn.execute("ALTER TABLE messages ADD COLUMN writer_id TEXT")
+                conn.execute("ALTER TABLE messages ADD COLUMN seq INTEGER")
+                conn.execute(
+                    """UPDATE messages SET writer_id = sender_id,
+                        seq = json_extract(vector_clock, '$."' || sender_id || '"')"""
+                )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_writer_seq ON messages(room_id, writer_id, seq)"
+            )
+            conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
             # If a happened-before b, then vc(a) <= vc(b) with one entry strictly smaller,
             # so sum(vc(a)) < sum(vc(b)). Ordering by (clock_sum, created_at, sender_id, message_id)
             # is therefore a causal order, and deterministic, so identical on every replica.
@@ -82,6 +98,20 @@ class StorageService:
             )
             conn.commit()
 
+    def writer_id(self, user_id: str) -> str:
+        """
+        This replica's identity in vector clocks, created with the database. A node whose data
+        is lost comes back as a new writer, so it can never reuse a sequence number.
+        """
+        with self._get_conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES ('writer_id', ?)",
+                (f"{user_id}/{secrets.token_hex(4)}",),
+            )
+            conn.commit()
+            row = conn.execute("SELECT value FROM meta WHERE key = 'writer_id'").fetchone()
+        return str(row["value"])
+
     def add_message(self, message: Message) -> bool:
         """
         Inserts a message in the local storage.
@@ -91,8 +121,8 @@ class StorageService:
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO messages
-                    (message_id, room_id, sender_id, content, vector_clock, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    (message_id, room_id, sender_id, content, vector_clock, created_at, writer_id, seq)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.message_id,
@@ -101,6 +131,8 @@ class StorageService:
                     message.content,
                     json.dumps(message.vector_clock),
                     message.created_at,
+                    message.writer_id,
+                    message.vector_clock.get(message.writer_id, 0),
                 ),
             )
             conn.commit()
@@ -142,38 +174,44 @@ class StorageService:
                 )
         return clocks
 
-    # ponytail: summary() and missing_messages() scan the whole table on every gossip round.
-    # Fine for a chat of a few thousand messages; past that, persist a per-(room, sender) watermark.
+    # ponytail: both run on the (room, writer, seq) index but still visit every message each
+    # round. Fine for tens of thousands of messages; past that, keep a per-(room, writer) watermark.
     def summary(self) -> Summary:
-        """What this replica holds: per room and sender, the highest gap-free sequence number."""
-        seqs: Dict[Tuple[str, str], Set[int]] = {}
-        with self._get_conn() as conn:
-            for row in conn.execute("SELECT room_id, sender_id, vector_clock FROM messages"):
-                seq = json.loads(row["vector_clock"]).get(row["sender_id"], 0)
-                seqs.setdefault((row["room_id"], row["sender_id"]), set()).add(seq)
-
+        """What this replica holds: per room and writer, the highest gap-free sequence number."""
         summary: Summary = {}
-        for (room_id, sender_id), held in seqs.items():
-            top = 0
-            while top + 1 in held:
-                top += 1
-            summary.setdefault(room_id, {})[sender_id] = top
+        with self._get_conn() as conn:
+            # Within the gap-free prefix the k-th smallest seq is k; the first gap breaks it.
+            for row in conn.execute(
+                """
+                SELECT room_id, writer_id, MAX(seq) AS top FROM (
+                    SELECT room_id, writer_id, seq,
+                        ROW_NUMBER() OVER (PARTITION BY room_id, writer_id ORDER BY seq) AS k
+                    FROM messages
+                ) WHERE seq = k GROUP BY room_id, writer_id
+                """
+            ):
+                summary.setdefault(row["room_id"], {})[row["writer_id"]] = row["top"]
         return summary
 
     def missing_messages(self, have: Summary, limit: int = 500) -> List[Message]:
         """
         Messages that a replica with summary `have` lacks, in causal order.
-        Causal order puts each sender's lowest missing sequence first, so every
+        Causal order puts each writer's lowest missing sequence first, so every
         batch closes the requester's gaps even when capped by `limit`.
         """
-        missing: List[Message] = []
         with self._get_conn() as conn:
-            for row in conn.execute(
-                "SELECT * FROM causal_messages ORDER BY clock_sum, created_at, sender_id, message_id"
-            ):
-                msg = _to_message(row)
-                if msg.vector_clock.get(msg.sender_id, 0) > have.get(msg.room_id, {}).get(msg.sender_id, 0):
-                    missing.append(msg)
-                    if len(missing) >= limit:
-                        break
-        return missing
+            rows = conn.execute(
+                """
+                WITH have (room_id, writer_id, seq) AS (
+                    SELECT room.key, writer.key, writer.value
+                    FROM json_each(?) AS room, json_each(room.value) AS writer
+                )
+                SELECT m.* FROM causal_messages AS m
+                LEFT JOIN have AS h ON h.room_id = m.room_id AND h.writer_id = m.writer_id
+                WHERE m.seq > COALESCE(h.seq, 0)
+                ORDER BY m.clock_sum, m.created_at, m.sender_id, m.message_id
+                LIMIT ?
+                """,
+                (json.dumps(have), limit),
+            ).fetchall()
+        return [_to_message(row) for row in rows]

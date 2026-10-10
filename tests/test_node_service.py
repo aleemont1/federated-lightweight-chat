@@ -65,16 +65,20 @@ async def test_initialize_idempotency_and_conflict(mocks):
 
 @pytest.mark.asyncio
 async def test_clocks_are_rebuilt_from_history(mocks, db_path):
-    """After a restart the next message continues the sender's sequence."""
-    StorageService(db_path).add_message(
-        Message(room_id="lobby", sender_id="alice", content="old", vector_clock={"alice": 10, "bob": 5})
+    """After a restart the next message continues this replica's sequence."""
+    storage = StorageService(db_path)
+    me = storage.writer_id("alice")
+    storage.add_message(
+        Message(
+            room_id="lobby", sender_id="alice", writer_id=me, content="old", vector_clock={me: 10, "bob": 5}
+        )
     )
     node = NodeService()
     await node.initialize("alice")
 
     sent = await node.send("lobby", "new")
 
-    assert sent.vector_clock == {"alice": 11, "bob": 5}
+    assert (sent.writer_id, sent.vector_clock) == (me, {me: 11, "bob": 5})
     await node.shutdown()
 
 
@@ -105,7 +109,7 @@ async def test_ingest_is_idempotent(mocks):
     assert await node.ingest(remote) is False
 
     manager.broadcast.assert_awaited_once_with(remote)
-    assert node.state.get_clock("general") == {"alice": 0, "bob": 3}
+    assert node.state.get_clock("general") == {node.state.writer_id: 0, "bob": 3}
     await node.shutdown()
 
 

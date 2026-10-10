@@ -1,5 +1,8 @@
 """Unit tests for storage service and CRUD ops on DB."""
 
+import json
+import sqlite3
+
 import pytest
 
 from src.core.message import Message
@@ -112,3 +115,49 @@ def test_missing_messages(storage_service):
 
     assert [m.content for m in storage_service.missing_messages({}, limit=2)] == ["alice1", "bob1"]
     assert storage_service.missing_messages({"general": {"alice": 3}, "other": {"bob": 1}}) == []
+
+
+def test_legacy_database_is_migrated(tmp_path):
+    """Volumes written before writer ids: the sender was the writer and its clock entry the seq."""
+    path = str(tmp_path / "old.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE messages (message_id TEXT PRIMARY KEY, room_id TEXT, sender_id TEXT,"
+            " content TEXT, vector_clock TEXT, created_at REAL)"
+        )
+        for seq in (1, 2):
+            conn.execute(
+                "INSERT INTO messages VALUES (?, 'general', 'alice', 'hi', ?, 1.0)",
+                (f"m{seq}", json.dumps({"alice": seq, "bob": 1})),
+            )
+
+    storage = StorageService(path)
+
+    assert storage.summary() == {"general": {"alice": 2}}
+    assert [m.writer_id for m in storage.get_room_messages("general")] == ["alice", "alice"]
+
+
+def test_writer_id_belongs_to_the_database(tmp_path):
+    """Same DB, same writer across restarts; a lost DB comes back as a new writer."""
+    first = StorageService(str(tmp_path / "a.db")).writer_id("alice")
+    assert StorageService(str(tmp_path / "a.db")).writer_id("alice") == first
+    reborn = StorageService(str(tmp_path / "b.db")).writer_id("alice")
+    assert reborn != first and reborn.startswith("alice/")
+
+
+def test_summary_and_missing_are_per_writer(storage_service):
+    """Two incarnations of alice number independently: neither hides the other."""
+    for seq, writer in ((1, "alice/old"), (2, "alice/old"), (1, "alice/new")):
+        storage_service.add_message(
+            Message(
+                room_id="general",
+                sender_id="alice",
+                writer_id=writer,
+                content=f"{writer}{seq}",
+                vector_clock={writer: seq},
+            )
+        )
+
+    assert storage_service.summary() == {"general": {"alice/old": 2, "alice/new": 1}}
+    missing = storage_service.missing_messages({"general": {"alice/old": 2}})
+    assert [m.content for m in missing] == ["alice/new1"]

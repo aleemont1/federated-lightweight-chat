@@ -79,8 +79,13 @@ class OrchestratorService:
         """Starts the user's node, creating it on first login. Idempotent."""
         with self._spawn_lock:
             container = self._find(username)
-            if container and self._env(container).get("NODE_TOKEN") is None:
-                container.remove(force=True)  # created before nodes had tokens
+            if container and (
+                self._env(container).get("NODE_TOKEN") is None
+                or container.attrs["Image"] != self._client.images.get(IMAGE).id
+            ):
+                # Created before nodes had tokens, or from an older image. The volume is kept.
+                logger.info("Recreating outdated container for %s", username)
+                container.remove(force=True)
                 container = None
             if container and container.status == "running":
                 return

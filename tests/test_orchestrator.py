@@ -18,6 +18,7 @@ def docker_client():
         client = from_env.return_value
         client.containers.get.side_effect = NotFound("missing")
         client.containers.list.return_value = []
+        client.images.get.return_value.id = "sha256:current"
         yield client
 
 
@@ -27,9 +28,9 @@ def orchestrator(docker_client):
     return OrchestratorService(max_users=2)
 
 
-def node(name, status="running", env=("NODE_TOKEN=tok",)):
-    """A mocked node container, by default running and carrying a token."""
-    container = MagicMock(status=status, attrs={"Config": {"Env": [f"NODE_ID={name}", *env]}})
+def node(name, status="running", env=("NODE_TOKEN=tok",), image="sha256:current"):
+    """A mocked node container, by default running the current image and carrying a token."""
+    container = MagicMock(status=status, attrs={"Image": image, "Config": {"Env": [f"NODE_ID={name}", *env]}})
     container.name = f"flc-node-{name}"  # MagicMock(name=...) would only set the repr
     return container
 
@@ -79,9 +80,14 @@ def test_node_token_is_read_back_from_the_container(orchestrator, docker_client)
     assert orchestrator.node_token("alice") == "a=b"
 
 
-def test_container_without_token_is_recreated(orchestrator, docker_client):
-    """Nodes created before tokens existed would accept nobody: replace them."""
-    legacy = node("alice", env=())
+@pytest.mark.parametrize("legacy", [{"env": ()}, {"image": "sha256:old"}])
+def test_outdated_container_is_recreated(orchestrator, docker_client, legacy):
+    """
+    No token: the node would accept nobody. Older image: it would keep running old code
+    (and an old DB schema) forever, since rebuilding the stack doesn't touch user nodes.
+    The data volume survives the recreation.
+    """
+    legacy = node("alice", **legacy)
     docker_client.containers.get.side_effect = None
     docker_client.containers.get.return_value = legacy
 

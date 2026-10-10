@@ -42,7 +42,9 @@ class NodeService:
 
         logger.info("Initializing node for user: %s", user_id)
         self.storage = StorageService(settings.db_name or f"{user_id}.db")
-        self.state = NodeState(node_id=user_id, room_clocks=self.storage.room_clocks())
+        self.state = NodeState(
+            node_id=user_id, room_clocks=self.storage.room_clocks(), writer_id=self.storage.writer_id(user_id)
+        )
         logger.info("State restored. Active rooms: %s", list(self.state.room_clocks))
 
         self._gossip = GossipService(
@@ -51,9 +53,8 @@ class NodeService:
             node_addr=settings.advertised_addr,
             on_message=self.ingest,
         )
-        # Catch up before serving: a node whose DB was lost must learn its own past
-        # sequence numbers before it sends, or it would reuse them. Drain one peer fully.
-        # ponytail: best effort, if no peer is reachable now the node starts from what it has.
+        # Catch up before serving, so the user sees the full history at once. Not needed for
+        # correctness: a node whose DB was lost is a new writer and can't reuse sequence numbers.
         await self._gossip.sync_once(drain=True)
         self._tasks = [asyncio.create_task(self._gossip.run()), asyncio.create_task(self._gossip.listen())]
 
@@ -75,6 +76,7 @@ class NodeService:
         message = Message(
             room_id=room_id,
             sender_id=self.state.node_id,
+            writer_id=self.state.writer_id,
             content=content,
             vector_clock=self.state.increment_clock(room_id),
         )
