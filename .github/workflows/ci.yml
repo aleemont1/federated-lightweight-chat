@@ -12,9 +12,9 @@ concurrency:
 
 jobs:
   checks:
-    name: Static Analysis, Security & Unit Tests
+    name: Static Analysis, Security, Unit & End-to-end Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -59,3 +59,14 @@ jobs:
 
       - name: Run Pytest with Coverage
         run: poetry run pytest -vv --cov=src --cov-report=term-missing --cov-fail-under=80
+
+      # Real containers, Redis and network cuts: the guarantees unit tests can't prove.
+      - name: End-to-end suite
+        run: ./scripts/e2e.sh
+
+      - name: Stack logs (on failure)
+        if: failure()
+        run: |
+          docker ps -a
+          docker compose logs --no-color
+          for c in $(docker ps -aq --filter label=app=flc-node); do docker logs "$c"; done

@@ -142,3 +142,16 @@ This script performs:
 - **Testing**: Runs pytest with coverage reports.
 
 
+
+### End-to-end Tests
+
+The distributed guarantees are tested against the real stack (containers, Redis, network cuts):
+
+```bash
+./scripts/e2e.sh
+```
+
+It builds and starts the stack, then checks that replicas converge past 100 messages, that every
+replica shows the same causal order, that a restarted node catches up before serving, that a
+network partition heals, that messages still replicate while Redis is down, and that nodes refuse
+requests without the right session. Without `FLC_E2E=1` these tests are skipped.
