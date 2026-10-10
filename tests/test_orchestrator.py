@@ -136,19 +136,30 @@ def test_max_users_limit_enforcement(orchestrator, docker_client):
     docker_client.containers.run.assert_not_called()
 
 
+def gateway(status=200, error=None):
+    """Patches the HTTP client is_ready uses; returns (Client class mock, its get mock)."""
+    client_cls = MagicMock()
+    get = client_cls.return_value.__enter__.return_value.get
+    get.return_value, get.side_effect = MagicMock(status_code=status), error
+    return patch("src.services.orchestrator.httpx.Client", client_cls), client_cls, get
+
+
 def test_is_ready_probes_the_gateway(orchestrator):
     """Ready means routable: the user's health endpoint answers through Traefik."""
-    with patch("src.services.orchestrator.httpx.get") as get:
-        get.return_value = MagicMock(status_code=404)  # Traefik has no route yet
+    patched, _, _ = gateway(404)  # Traefik has no route yet
+    with patched:
         assert orchestrator.is_ready("alice") is False
 
-        get.return_value = MagicMock(status_code=200)
+    patched, client_cls, get = gateway(200)
+    with patched:
         assert orchestrator.is_ready("alice") is True
-        get.assert_called_with(
-            "http://flc-gateway/api/health", headers={"Host": "alice.localhost"}, timeout=2
-        )
+    client_cls.assert_called_once_with(verify=True, timeout=2)
+    get.assert_called_once_with(
+        "http://flc-gateway/api/health", headers={"Host": "alice.localhost"}, extensions={}
+    )
 
-        get.side_effect = httpx.ConnectError("gateway down")
+    patched, _, _ = gateway(error=httpx.ConnectError("gateway down"))
+    with patched:
         assert orchestrator.is_ready("alice") is False
 
 
@@ -164,3 +175,31 @@ def test_stop_user_node(orchestrator, docker_client):
     docker_client.containers.get.assert_called_with("flc-node-alice")
     container.stop.assert_called_once()
     container.remove.assert_called_once()
+
+
+@pytest.mark.parametrize("domain,verify", [("203.0.113.7.nip.io", True), ("localhost", False)])
+def test_is_ready_with_tls_waits_for_a_valid_certificate(orchestrator, domain, verify):
+    """
+    Through HTTPS, presenting the user's name as SNI like a browser, and verifying the certificate:
+    until Let's Encrypt issues it, Traefik's self-signed default would fail in the browser.
+    *.localhost can't get a public certificate, so there only routing is checked.
+    """
+    host = f"alice.{domain}"
+    patched, client_cls, get = gateway(200)
+    with patched, patch.multiple("src.services.orchestrator.settings", tls=True, public_domain=domain):
+        assert orchestrator.is_ready("alice") is True
+    client_cls.assert_called_once_with(verify=verify, timeout=2)
+    get.assert_called_once_with(
+        "https://flc-gateway/api/health", headers={"Host": host}, extensions={"sni_hostname": host}
+    )
+
+
+def test_spawn_with_tls_asks_for_a_certificate(orchestrator, docker_client):
+    """Node routers use the HTTPS entrypoint and request a certificate; the node knows (Secure cookie)."""
+    with patch("src.services.orchestrator.settings.tls", True):
+        orchestrator.spawn_user_node("alice")
+
+    kwargs = docker_client.containers.run.call_args.kwargs
+    assert kwargs["labels"]["traefik.http.routers.flc-alice.entrypoints"] == "websecure"
+    assert kwargs["labels"]["traefik.http.routers.flc-alice.tls.certresolver"] == "le"
+    assert kwargs["environment"]["TLS"] == "True"

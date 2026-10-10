@@ -3,7 +3,7 @@ Unit tests for the Orchestrator API endpoints.
 OrchestratorService is mocked; accounts use a real SQLite file.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -125,3 +125,11 @@ def test_stop_refuses_without_the_password(orch, accounts, password):
 
     assert response.status_code in (401, 422)
     orch.stop_user_node.assert_not_called()
+
+
+def test_links_use_https_and_the_public_domain_with_tls(orch, accounts):
+    """Deployed, the login link points at the node's HTTPS address on the public domain."""
+    with patch.multiple("src.orchestrator_api.settings", tls=True, public_domain="203.0.113.7.nip.io"):
+        response = client.post("/login", data={"username": "alice", "password": PASSWORD})
+
+    assert "https://alice.203.0.113.7.nip.io/api/auth?token=tok123" in response.text

@@ -39,7 +39,12 @@ def get_accounts() -> Accounts:
 def _landing(
     request: Request, orch: OrchestratorService, error: Optional[str] = None, code: int = 200
 ) -> HTMLResponse:
-    context = {"active_users": orch.get_active_users(), "domain": settings.public_domain, "error": error}
+    context = {
+        "active_users": orch.get_active_users(),
+        "domain": settings.public_domain,
+        "scheme": settings.public_scheme,
+        "error": error,
+    }
     return templates.TemplateResponse(request, "landing.html", context, status_code=code)
 
 
@@ -72,7 +77,9 @@ def login(
     except MaxUsersReachedError as e:
         return _landing(request, orch, str(e), status.HTTP_503_SERVICE_UNAVAILABLE)
     # ponytail: the token travels in the URL once (history, proxy logs); the node swaps it for a cookie.
-    node_url = f"http://{name}.{settings.public_domain}/api/auth?token={orch.node_token(name)}"
+    node_url = (
+        f"{settings.public_scheme}://{name}.{settings.public_domain}/api/auth?token={orch.node_token(name)}"
+    )
     return templates.TemplateResponse(request, "loading.html", {"user": name, "node_url": node_url})
 
 

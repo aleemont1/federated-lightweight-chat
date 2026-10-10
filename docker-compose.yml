@@ -10,8 +10,8 @@ services:
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
     ports:
-      - "80:80"     # The main entry point
-      - "8080:8080" # Traefik Dashboard
+      - "80:80"                # The main entry point
+      - "127.0.0.1:8080:8080"  # Traefik dashboard: unauthenticated, so this machine only
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
@@ -53,12 +53,12 @@ services:
       # Python SDK might still need this if it's old, but Traefik v3.6 handles itself
       - DOCKER_API_VERSION=1.44
       - MAX_USERS=${MAX_USERS:-10}
+      - PUBLIC_DOMAIN=${PUBLIC_DOMAIN:-localhost}
       - ACCOUNTS_DB=/data/accounts.db
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.orchestrator.rule=Host(`localhost`) || Host(`flc.localhost`)"
+      - "traefik.http.routers.orchestrator.rule=Host(`${PUBLIC_DOMAIN:-localhost}`)"
       - "traefik.http.routers.orchestrator.entrypoints=web"
-      # FIX: Tell Traefik to route to port 8000 (FastAPI default)
       - "traefik.http.services.orchestrator.loadbalancer.server.port=8000"
     networks:
       - flc-net

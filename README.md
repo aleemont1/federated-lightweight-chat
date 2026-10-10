@@ -52,7 +52,8 @@ per node, input limits); nodes trust each other, so crash faults are tolerated, 
 
 ## Running it
 
-Requirements: Docker with Compose, and port 80 free (8080 serves the Traefik dashboard).
+Requirements: Docker with Compose, and port 80 free. The Traefik dashboard is at
+<http://localhost:8080>, reachable from this machine only.
 `*.localhost` resolves to your machine in browsers and curl, so no `/etc/hosts` changes are needed.
 
 ```bash
@@ -95,6 +96,31 @@ docker ps -aq --filter label=app=flc-node | xargs -r docker rm -f    # user node
 docker volume ls -q --filter name=flc_data_ | xargs -r docker volume rm   # all chat data (irreversible)
 ```
 
+## Deploying
+
+FLC needs a machine where it can run Docker itself: the orchestrator starts a container per
+user, so app platforms without a Docker socket won't do. Any Linux VM works, e.g. a free
+[Oracle Cloud](https://www.oracle.com/cloud/free/) ARM instance. No domain is needed:
+[nip.io](https://nip.io) resolves `alice.203.0.113.7.nip.io` to `203.0.113.7`.
+
+1. Open ports 80 and 443 to the internet, both in the provider's firewall (on Oracle, the
+   subnet's security list) and on the VM itself if its image ships with a restrictive one.
+2. Install Docker with Compose, clone the repository, and start the stack with HTTPS:
+
+   ```bash
+   export PUBLIC_DOMAIN=203.0.113.7.nip.io ACME_EMAIL=you@example.org   # your VM's public IP
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+   ```
+
+3. Share `https://203.0.113.7.nip.io`. Each user's node gets its own Let's Encrypt certificate
+   the first time it starts, and the loading page waits until that certificate is valid.
+
+`docker-compose.prod.yml` redirects HTTP to HTTPS, requests certificates with the HTTP-01
+challenge (so port 80 must stay open), marks the session cookie `Secure`, and drops the
+Traefik dashboard. To rehearse without touching Let's Encrypt's rate limits, add
+`ACME_CA_SERVER=https://acme-staging-v02.api.letsencrypt.org/directory` (browsers won't trust
+those certificates), then `docker volume rm flc_letsencrypt` before the real run.
+
 ## Development
 
 ```bash
@@ -136,7 +162,8 @@ docker-compose.yml        # gateway, Redis, orchestrator
 
 ## Known limits
 
-- Plain HTTP: tokens and cookies travel unencrypted. A real deployment needs TLS at the gateway.
+- HTTPS only with `docker-compose.prod.yml`: the local setup is plain HTTP.
+- Login has no rate limit: scrypt slows guessing down, but nothing locks an account.
 - Every node stores every room, and each anti-entropy round visits the whole log: right for a
   handful of users and tens of thousands of messages, not beyond.
 - Rooms are open to every user.

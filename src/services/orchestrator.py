@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 IMAGE = "flc-node:latest"
 NETWORK = "flc-net"
-GATEWAY = "http://flc-gateway"
+GATEWAY = "flc-gateway"
 NODE_LABEL = "app=flc-node"
 NAME_PREFIX = "flc-node-"
 # A DNS label, so that the username can be the node's subdomain.
@@ -67,10 +67,20 @@ class OrchestratorService:
         """
         True once the gateway routes to the user's node. Traefik only routes healthy containers,
         and picks up health changes with a short delay, so "healthy" alone isn't "reachable".
+        With TLS it also waits for the node's certificate: until Let's Encrypt issues it, Traefik
+        serves a self-signed default, and the browser would show a certificate error.
         """
         host = f"{username}.{settings.public_domain}"
+        if not settings.tls:
+            url, extensions, verify = f"http://{GATEWAY}/api/health", {}, True
+        else:
+            # SNI picks the certificate, so present the user's name, as a browser would.
+            # *.localhost can never get a public certificate: there, check routing only.
+            url, extensions = f"https://{GATEWAY}/api/health", {"sni_hostname": host}
+            verify = not host.endswith("localhost")
         try:
-            response = httpx.get(f"{GATEWAY}/api/health", headers={"Host": host}, timeout=2)
+            with httpx.Client(verify=verify, timeout=2) as client:
+                response = client.get(url, headers={"Host": host}, extensions=extensions)
         except httpx.HTTPError:
             return False
         return response.status_code == 200
@@ -101,6 +111,7 @@ class OrchestratorService:
 
             logger.info("Spawning new node for %s...", username)
             router = f"flc-{username}"  # prefixed so a user can't shadow the orchestrator's router
+            tls_labels = {f"traefik.http.routers.{router}.tls.certresolver": "le"} if settings.tls else {}
             self._client.containers.run(
                 image=IMAGE,
                 name=NAME_PREFIX + username,
@@ -114,8 +125,9 @@ class OrchestratorService:
                     f"traefik.http.routers.{router}.rule": (
                         f"Host(`{username}.{settings.public_domain}`) && !PathPrefix(`/api/internal`)"
                     ),
-                    f"traefik.http.routers.{router}.entrypoints": "web",
+                    f"traefik.http.routers.{router}.entrypoints": "websecure" if settings.tls else "web",
                     f"traefik.http.services.{router}.loadbalancer.server.port": "8000",
+                    **tls_labels,
                 },
                 environment={
                     "NODE_ID": username,
@@ -124,6 +136,7 @@ class OrchestratorService:
                     "DB_NAME": f"/data/{username}.db",
                     # Peers reach each other by container name on the Docker network.
                     "ADVERTISED_ADDR": f"http://{NAME_PREFIX}{username}:8000",
+                    "TLS": str(settings.tls),
                 },
                 volumes={f"flc_data_{username}": {"bind": "/data", "mode": "rw"}},
                 restart_policy={"Name": "on-failure", "MaximumRetryCount": 3},

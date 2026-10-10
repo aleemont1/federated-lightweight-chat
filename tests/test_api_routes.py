@@ -200,6 +200,15 @@ def test_auth_link_sets_session_cookie():
     assert response.headers["location"] == "/"
     assert f"{src.api.routes.SESSION_COOKIE}={TOKEN}" in response.headers["set-cookie"]
     assert "httponly" in response.headers["set-cookie"].lower()
+    assert "secure" not in response.headers["set-cookie"].lower()  # plain HTTP locally
+
+
+def test_session_cookie_is_secure_with_tls():
+    """Behind HTTPS the cookie must never travel over plain HTTP."""
+    client.cookies.clear()
+    with patch.object(src.api.routes.settings, "tls", True):
+        response = client.get(f"/api/auth?token={TOKEN}", follow_redirects=False)
+    assert "secure" in response.headers["set-cookie"].lower()
 
 
 def test_logout_clears_only_this_browsers_cookie(mock_node_service):

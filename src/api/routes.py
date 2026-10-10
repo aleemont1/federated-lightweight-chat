@@ -67,7 +67,7 @@ async def auth(token: str) -> RedirectResponse:
     if not _is_token(token):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid login link.")
     response = RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
-    response.set_cookie(SESSION_COOKIE, token, path="/", samesite="lax", httponly=True)
+    response.set_cookie(SESSION_COOKIE, token, path="/", samesite="lax", httponly=True, secure=settings.tls)
     return response
 
 
@@ -76,7 +76,7 @@ async def logout() -> RedirectResponse:
     """Ends the session in this browser only: the node keeps running for the others."""
     # Back to "/": without a session the page sends the browser on to the orchestrator.
     response = RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
-    response.delete_cookie(SESSION_COOKIE, path="/", samesite="lax", httponly=True)
+    response.delete_cookie(SESSION_COOKIE, path="/", samesite="lax", httponly=True, secure=settings.tls)
     return response
 
 
