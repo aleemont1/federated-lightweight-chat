@@ -11,147 +11,132 @@
 
 </div>
 
-Federated Lightweight Chat (FLC) is a distributed, container-native messaging system designed to demonstrate Eventual Consistency, Vector Clocks, and Dynamic Orchestration.
+Federated Lightweight Chat (FLC) is a group chat built to study replication under failures.
+Every user gets their own node (a container with its own SQLite database), every node keeps a
+full copy of every room, and the copies converge on their own. A node keeps accepting messages
+while it is cut off from the others or while Redis is down, and every node shows each room in
+the same order, with replies always after what they answer.
 
-Unlike traditional chat applications, FLC assigns a dedicated, isolated Docker container to each user. These nodes communicate peer-to-peer using a Gossip Protocol, while a central Orchestrator handles lifecycle management and an Edge Router (Traefik) handles dynamic domain routing.
-
-## 🚀 Key Features
-
-Dynamic User Provisioning: The Orchestrator service listens on the Docker Socket to automatically spawn new containers when users log in.
-
-Dynamic Edge Routing: Traefik acts as a reverse proxy, automatically discovering new user containers and routing traffic to subdomains (e.g., alice.localhost, bob.localhost) without restarts.
-
-Decentralized Messaging: Messages are stored locally in each node's SQLite database. There is no central message database.
-
-Eventual Consistency: Implements a randomized Gossip Protocol and Anti-Entropy mechanisms to synchronize messages between nodes.
-
-Causal Ordering: Utilizes Vector Clocks to track message causality, ensuring consistent history ordering even across network partitions.
-
-Self-Healing: Nodes automatically recover missing messages from peers upon restart using the discovery service.
-
-## 🛠️ Tech Stack
-
-<div align="center">
-
-<table>
-<tr>
-<td><strong>Framework</strong></td>
-<td><img src="https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi"></td>
-</tr>
-<tr>
-<td><strong>Orchestration</strong></td>
-<td><img src="https://img.shields.io/badge/docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white"></td>
-</tr>
-<tr>
-<td><strong>Routing</strong></td>
-<td><img src="https://img.shields.io/badge/Traefik-%252324a1c1.svg?style=for-the-badge&logo=traefik&logoColor=white"></td>
-</tr>
-<tr>
-<td><strong>Discovery</strong></td>
-<td><img src="https://img.shields.io/badge/Redis-%23DD0031.svg?style=for-the-badge&logo=redis&logoColor=white"></td>
-</tr>
-<tr>
-<td><strong>Storage</strong></td>
-<td><img src="https://img.shields.io/badge/sqlite-%2307405e.svg?style=for-the-badge&logo=sqlite&logoColor=white"></td>
-</tr>
-<tr>
-<td><strong>Validation</strong></td>
-<td><img src="https://img.shields.io/badge/pydantic-%23E92063.svg?style=for-the-badge&logo=pydantic&logoColor=white"></td>
-</tr>
-</table>
-
-</div>
-
-## 📦 Architecture Overview
-
-The system consists of three main infrastructure layers:
-
-Traefik (Edge Router): The entry point. It routes localhost to the Orchestrator and *.localhost to specific user containers.
-
-Orchestrator: A control plane that manages the Docker lifecycle. It spawns user nodes and provides a "Loading" UI while containers initialize.
-
-Redis: Acts as a discovery directory for nodes to find each other's internal IPs within the bridge network.
-
-## 📂 Project Structure
+## How it works
 
 ```
-federated-lightweight-chat/
-├── src/
-│   ├── api/                    # FastAPI Routes for User Nodes
-│   ├── config/                 # Pydantic Settings
-│   ├── core/                   # Domain logic (Vector Clocks, Messages)
-│   ├── services/               # Logic (Orchestrator, Gossip, Storage)
-│   ├── static/                 # Frontend assets (JS, CSS)
-│   ├── main.py                 # Entry point for User Nodes
-│   └── orchestrator_api.py     # Entry point for the Orchestrator
-├── scripts/                    # Utility scripts (Deployment & Testing)
-├── tests/                      # Unit and Integration tests
-├── docker-compose.yml          # Infrastructure definition
-└── Dockerfile                  # One image: user nodes and the orchestrator
+                    http://localhost                 http://<user>.localhost
+browser ─────────────► Traefik (flc-gateway) ──────────────┬──────────────┐
+                            │                              ▼              ▼
+                            ▼                        flc-node-alice  flc-node-bob   ...
+                     flc-orchestrator                 SQLite replica  SQLite replica
+                     accounts, spawns nodes               │   ▲  pull anti-entropy ▲
+                     via the Docker socket                │   └────────────────────┘
+                                                          ▼
+                                              flc-redis: discovery + pub/sub
 ```
 
-## ⚡ Getting Started
+- **Orchestrator**: checks the password (the first login claims a username), starts the user's
+  node through the Docker socket, and hands the browser a login link carrying the
+  node's secret token. The node trades it for a session cookie.
+- **Gateway** (Traefik): routes `localhost` to the orchestrator and `<user>.localhost` to that
+  user's node. It never routes `/api/internal`, so node-to-node sync stays on the Docker network.
+- **Nodes**: each one writes locally and never waits for the others. Two replication paths:
+  - *fast path*: a new message is published on Redis pub/sub and stored by every online node;
+  - *anti-entropy*: every 2 s a node sends a random peer its summary (per room and writer, the
+    highest sequence number with no gaps below it) and pulls whatever it lacks. This path alone
+    guarantees convergence, after crashes, restarts, partitions or a Redis outage.
+- **Ordering**: each message carries a vector clock. Rooms are sorted by the sum of the clock,
+  then timestamp, sender and id. That order respects causality (if A happened before B, A's sum
+  is smaller) and is identical on every node, whatever each machine's clock says.
+- **Writers**: clocks are keyed by a writer id created with each database (`alice/7f3a9c1e`), not
+  by the username, so a node that lost its data can never reuse a sequence number.
 
-Prerequisites
+Trust model: users and outsiders are not trusted (passwords hashed with scrypt, a random token
+per node, input limits); nodes trust each other, so crash faults are tolerated, Byzantine ones are not.
 
-Docker and Docker Compose installed.
+## Running it
 
-Ports 80 (Gateway), 8080 (Traefik Dashboard), and 6379 (Redis) must be available.
-
-### 🚀 Automated Local Deployment (for Development)
-
-To streamline the startup process, use the provided helper script scripts/local_deploy.sh. It handles image building and container orchestration in one step:
-```bash
-./scripts/local_deploy.sh
-```
-
-### Manual Deployment
-
-1. Build the images:
-```bash
-docker-compose build
-```
-
-2. Start the infrastructure:
-```bash
-docker-compose up -d
-```
-
-3. Access the application:
-
-Open http://localhost to access the Orchestrator.
-
-Login with a username (e.g., alice). The system will spawn a container and redirect you to http://<username>.localhost.
-
-## 🧪 Development & Quality Assurance
-
-This project adheres to strict code quality standards. We provide utility scripts to run tests and linters easily.
-
-### Local Quality Check
-
-To run the full quality assurance suite (formatting, static analysis, and unit tests), use the check.sh script:
+Requirements: Docker with Compose, and port 80 free (8080 serves the Traefik dashboard).
+`*.localhost` resolves to your machine in browsers and curl, so no `/etc/hosts` changes are needed.
 
 ```bash
-./scripts/check.sh
+./scripts/local_deploy.sh        # same as: docker compose up -d --build
 ```
 
-This script performs:
+Open <http://localhost>, choose a username and a password (at least 8 characters), and you land
+on `http://<username>.localhost` once the node is up. Cookies are per subdomain, so several users
+can be logged in from tabs of the same browser.
 
-- **Formatting**: black and isort.
-- **Static Analysis**: mypy (types) and flake8 (lint).
-- **Testing**: Runs pytest with coverage reports.
+- **Logout** (in the chat) ends the session in that browser only; the node keeps running.
+- **Stop node** (on the landing page, with the password) removes the user's container. The data
+  volume `flc_data_<user>` is kept, and the next login picks up where it left off.
 
+Settings: `MAX_USERS` (default 10) caps the running nodes: `MAX_USERS=3 docker compose up -d`.
+Logs: `docker compose logs -f` for the stack, `docker logs -f flc-node-<user>` for a node.
 
-
-### End-to-end Tests
-
-The distributed guarantees are tested against the real stack (containers, Redis, network cuts):
+### Two users from the terminal
 
 ```bash
-./scripts/e2e.sh
+login() {  # login <user> <password>: claims the account, starts the node, stores the session cookie
+  link=$(curl -s -d "username=$1" -d "password=$2" http://localhost/login \
+         | grep -o "http://$1.localhost/api/auth?token=[A-Za-z0-9_-]*" | head -1)
+  until curl -s "http://localhost/status/$1" | grep -q true; do sleep 1; done
+  curl -s -o /dev/null -c "$1.jar" "$link"
+}
+login alice alice-password
+login bob bob-password
+
+curl -s -b alice.jar -H 'Content-Type: application/json' \
+     -d '{"room_id": "general", "content": "hi from alice"}' http://alice.localhost/api/messages
+curl -s -b bob.jar 'http://bob.localhost/api/messages?room_id=general'
 ```
 
-It builds and starts the stack, then checks that replicas converge past 100 messages, that every
-replica shows the same causal order, that a restarted node catches up before serving, that a
-network partition heals, that messages still replicate while Redis is down, and that nodes refuse
-requests without the right session. Without `FLC_E2E=1` these tests are skipped.
+### Stopping and cleaning up
+
+```bash
+docker compose down                                                  # gateway, Redis, orchestrator
+docker ps -aq --filter label=app=flc-node | xargs -r docker rm -f    # user nodes
+docker volume ls -q --filter name=flc_data_ | xargs -r docker volume rm   # all chat data (irreversible)
+```
+
+## Development
+
+```bash
+poetry install --with dev
+./scripts/check.sh      # black, isort, mypy, flake8, bandit, pytest with coverage >= 80%
+./scripts/e2e.sh        # end-to-end suite against the real stack
+```
+
+The end-to-end suite starts the stack and checks one guarantee per test: replicas converge past
+100 messages; every replica shows the same causal order; a restarted node has caught up before
+it serves; both sides of a network partition keep accepting messages and agree once it heals;
+messages still replicate while Redis is stopped; nodes refuse requests without the right
+session. It is skipped unless `FLC_E2E=1` is set, which `e2e.sh` does.
+
+CI runs the same gates and the end-to-end suite on every pull request; pushes to `main` publish
+the image to Docker Hub after the same checks.
+
+## Project structure
+
+```
+src/
+├── main.py               # node app: chat UI, REST and WebSocket API
+├── orchestrator_api.py   # orchestrator app: landing page, login, stop
+├── api/routes.py         # node endpoints, session checks, internal sync endpoint
+├── core/                 # Message model, vector clocks, in-memory node state
+├── services/
+│   ├── node.py           # a node's lifecycle: storage, clocks, replication tasks
+│   ├── gossip.py         # discovery, pub/sub fast path, pull anti-entropy
+│   ├── storage.py        # SQLite replica, causal order, summaries
+│   ├── orchestrator.py   # Docker: spawn, stop, readiness through the gateway
+│   ├── accounts.py       # scrypt password store
+│   └── websocket.py      # live updates to open chat tabs
+├── static/               # chat front end (Tailwind, marked, DOMPurify, highlight.js)
+└── templates/            # orchestrator pages
+tests/                    # unit tests, plus test_e2e.py for the real stack
+Dockerfile                # one image for nodes and orchestrator
+docker-compose.yml        # gateway, Redis, orchestrator
+```
+
+## Known limits
+
+- Plain HTTP: tokens and cookies travel unencrypted. A real deployment needs TLS at the gateway.
+- Every node stores every room, and each anti-entropy round visits the whole log: right for a
+  handful of users and tens of thousands of messages, not beyond.
+- Rooms are open to every user.
