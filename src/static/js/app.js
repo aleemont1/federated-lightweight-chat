@@ -1,4 +1,4 @@
-import { ApiClient, ORCHESTRATOR_URL } from './api.js';
+import { ApiClient } from './api.js';
 
 class ChatApp {
     constructor() {
@@ -150,11 +150,6 @@ class ChatApp {
     async transitionToChat() {
         if (this.dom.views.chat) this.dom.views.chat.classList.remove('hidden');
         if (this.dom.containers.userInfo) this.dom.containers.userInfo.textContent = this.state.user.username;
-        // Logout stops this node; the session token proves to the orchestrator that it's us.
-        document.getElementById('logout-form').action = `${ORCHESTRATOR_URL}/logout`;
-        document.getElementById('logout-username').value = this.state.user.username;
-        document.getElementById('logout-token').value =
-            (document.cookie.match(/(?:^|; )flc_session=([^;]*)/) || [])[1] || '';
         
         try {
             const rooms = await this.api.getRooms();

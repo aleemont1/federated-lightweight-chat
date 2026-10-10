@@ -1,10 +1,9 @@
 """
-Orchestrator API: landing page, login (starts the user's node) and logout (removes it).
+Orchestrator API: landing page, login (starts the user's node) and stop (removes it).
 Endpoints are sync on purpose: Docker SDK calls block, so FastAPI runs them in its threadpool.
 """
 
 import contextlib
-import hmac
 import logging
 from functools import cache
 from typing import Dict, Optional
@@ -85,29 +84,20 @@ def node_status(user: str, orch: OrchestratorService = Depends(get_orchestrator)
     return {"ready": False}
 
 
-@app.post("/logout")
-def logout(
+@app.post("/stop")
+def stop(
     request: Request,
     username: str = Form(...),
-    password: str = Form(""),
-    token: str = Form(""),
+    password: str = Form(...),
     orch: OrchestratorService = Depends(get_orchestrator),
     accounts: Accounts = Depends(get_accounts),
 ) -> Response:
-    """
-    Stops and removes the user's node. Proof is the password (landing page)
-    or the node's token (the logout button inside the chat).
-    """
+    """Stops and removes the user's node, ending all its sessions. The data volume is kept."""
     try:
         name = normalize_username(username)
     except ValueError:
         return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)  # can't have a node
-    node_token = orch.node_token(name)
-    if node_token is None:
-        return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)  # nothing to stop
-
-    has_token = bool(token) and hmac.compare_digest(token.encode(), node_token.encode())
-    if not (has_token or accounts.verify(name, password)):
+    if not accounts.verify(name, password):
         return _landing(request, orch, "Wrong username or password.", status.HTTP_401_UNAUTHORIZED)
     orch.stop_user_node(name)
     return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)

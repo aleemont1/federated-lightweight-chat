@@ -45,10 +45,8 @@
                             <span id="user-info" class="font-medium text-sm truncate">User</span>
                         </div>
                     </div>
-                    <!-- Logout stops this node: posted to the orchestrator, action set by app.js -->
-                    <form id="logout-form" method="post">
-                        <input type="hidden" name="username" id="logout-username">
-                        <input type="hidden" name="token" id="logout-token">
+                    <!-- Ends the session in this browser only; stopping the node is on the orchestrator's page -->
+                    <form id="logout-form" method="post" action="/api/logout">
                         <button type="submit" class="w-full text-xs font-medium text-red-500 hover:text-red-700 hover:bg-red-50 py-2 rounded border border-red-200 transition">
                             Logout
                         </button>

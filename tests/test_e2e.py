@@ -91,9 +91,9 @@ def login(user: str) -> Node:
     return Node(user, token[1])
 
 
-def logout(node: Node) -> None:
+def stop_node(node: Node) -> None:
     with orchestrator() as orch:
-        orch.post("/logout", data={"username": node.user, "password": PASSWORD})
+        orch.post("/stop", data={"username": node.user, "password": PASSWORD})
 
 
 @pytest.fixture(scope="module")
@@ -105,7 +105,7 @@ def cluster() -> Iterator[List[Node]]:
     yield nodes
     client = docker.from_env()
     for node in nodes:
-        logout(node)
+        stop_node(node)
         try:
             client.volumes.get(f"flc_data_{node.user}").remove()
         except NotFound:
@@ -150,7 +150,7 @@ def test_restarted_node_catches_up_before_serving(cluster: List[Node]) -> None:
     """A node offline while others write has everything as soon as it's back."""
     a, _, c = cluster
     r = room()
-    logout(c)  # container removed, data volume kept
+    stop_node(c)  # container removed, data volume kept
     sent = [a.send(r, f"while c was down {i}")["message_id"] for i in range(20)]
 
     c2 = login(c.user)
@@ -198,7 +198,7 @@ def test_messages_still_replicate_while_redis_is_down(cluster: List[Node]) -> No
 
 
 def test_nodes_refuse_everything_without_the_right_session(cluster: List[Node]) -> None:
-    """The audit's attacks: anonymous access, another user's cookie, public sync, logout by name."""
+    """The audit's attacks: anonymous access, another user's cookie, public sync, stop by name."""
     a, b, _ = cluster
     anon = httpx.Client(base_url=GATEWAY, headers={"Host": f"{a.user}.localhost"})
     assert anon.get("/api/rooms").status_code == 401
@@ -209,5 +209,5 @@ def test_nodes_refuse_everything_without_the_right_session(cluster: List[Node]) 
     assert borrowed.status_code == 401
 
     with orchestrator() as orch:
-        assert orch.post("/logout", data={"username": a.user}).status_code == 401
+        assert orch.post("/stop", data={"username": a.user, "password": "wrong-password"}).status_code == 401
         assert orch.post("/login", data={"username": a.user, "password": "wrong-password"}).status_code == 401

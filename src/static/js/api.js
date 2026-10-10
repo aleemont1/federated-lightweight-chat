@@ -4,7 +4,7 @@
  */
 
 // The orchestrator lives on the parent domain: alice.localhost -> localhost
-export const ORCHESTRATOR_URL = `${location.protocol}//${location.host.split('.').slice(1).join('.')}`;
+const ORCHESTRATOR_URL = `${location.protocol}//${location.host.split('.').slice(1).join('.')}`;
 
 export class ApiClient {
     constructor(baseUrl = '/api') {

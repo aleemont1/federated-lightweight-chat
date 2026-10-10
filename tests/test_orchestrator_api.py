@@ -111,28 +111,17 @@ def test_status_reports_readiness(orch):
     assert client.get("/status/no_such").json() == {"ready": False}
 
 
-@pytest.mark.parametrize("proof", [{"password": PASSWORD}, {"token": "tok123"}])
-def test_logout_with_password_or_token(orch, accounts, proof):
-    """The landing form proves with the password, the chat's button with the node token."""
-    response = client.post("/logout", data={"username": "Alice", **proof}, follow_redirects=False)
+def test_stop_needs_the_password(orch, accounts):
+    response = client.post("/stop", data={"username": "Alice", "password": PASSWORD}, follow_redirects=False)
 
     assert response.status_code == 303
     orch.stop_user_node.assert_called_once_with("alice")
 
 
-@pytest.mark.parametrize("proof", [{}, {"password": "guess guess"}, {"token": "nope"}, {"token": "é"}])
-def test_logout_requires_proof(orch, accounts, proof):
+@pytest.mark.parametrize("password", ["", "guess guess"])
+def test_stop_refuses_without_the_password(orch, accounts, password):
     """Previously anyone could stop anyone's node by name."""
-    response = client.post("/logout", data={"username": "alice", **proof})
+    response = client.post("/stop", data={"username": "alice", "password": password})
 
-    assert response.status_code == 401
-    orch.stop_user_node.assert_not_called()
-
-
-def test_logout_of_missing_node_is_a_no_op(orch, accounts):
-    """Nothing running, nothing to authorize or stop."""
-    orch.node_token.return_value = None
-    response = client.post("/logout", data={"username": "ghost"}, follow_redirects=False)
-
-    assert response.status_code == 303
+    assert response.status_code in (401, 422)
     orch.stop_user_node.assert_not_called()

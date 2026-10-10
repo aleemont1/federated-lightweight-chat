@@ -201,6 +201,17 @@ def test_auth_link_sets_session_cookie():
     assert response.status_code == 303
     assert response.headers["location"] == "/"
     assert f"{src.api.routes.SESSION_COOKIE}={TOKEN}" in response.headers["set-cookie"]
+    assert "httponly" in response.headers["set-cookie"].lower()
+
+
+def test_logout_clears_only_this_browsers_cookie(mock_node_service):
+    """Logout ends the session here; the node and the token stay valid for other browsers."""
+    response = client.post("/api/logout", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/"
+    assert f'{src.api.routes.SESSION_COOKIE}=""' in response.headers["set-cookie"]
+    mock_node_service.shutdown.assert_not_called()
 
 
 @pytest.mark.parametrize("token", ["wrong", "", "\u00e9"])
