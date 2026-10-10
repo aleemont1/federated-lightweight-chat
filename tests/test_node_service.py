@@ -3,6 +3,7 @@ Unit tests for the NodeService.
 Real SQLite storage; GossipService (Redis + network) and the WebSocket manager are mocked.
 """
 
+import sqlite3
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -123,6 +124,22 @@ async def test_shutdown_lifecycle(mocks):
 
     await node.shutdown()
 
-    assert not node.is_initialized()
+    assert node.state is None
     assert all(t.done() for t in tasks)
     gossip_cls.return_value.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_write_burns_no_sequence_number(mocks):
+    """Regression: the clock moved before the insert, so a disk error left a permanent gap."""
+    node = NodeService()
+    await node.initialize("alice")
+    me = node.state.writer_id
+    with patch.object(node.storage, "add_message", side_effect=sqlite3.OperationalError("disk full")):
+        with pytest.raises(sqlite3.OperationalError):
+            await node.send("general", "lost")
+
+    sent = await node.send("general", "kept")
+
+    assert sent.vector_clock[me] == 1
+    await node.shutdown()

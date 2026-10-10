@@ -8,6 +8,7 @@ class ChatApp {
             user: null,
             currentRoom: 'general',
             socket: null,
+            shown: new Set(), // message ids on screen: history and live pushes can overlap
             knownRooms: new Set(['general']),
             isSidebarOpen: window.innerWidth >= 768, 
         };
@@ -176,7 +177,7 @@ class ChatApp {
         this.dom.inputs.newRoom.value = '';
     }
 
-    async switchRoom(roomId) {
+    switchRoom(roomId) {
         if (this.state.currentRoom === roomId && this.state.socket) return;
         this.state.currentRoom = roomId;
         
@@ -187,8 +188,7 @@ class ChatApp {
             this.toggleSidebar(false);
         }
 
-        this.disconnectWebSocket();
-        await this.loadHistory();
+        // Synchronous from the guard to the new socket, so a second click can't slip in between.
         this.connectWebSocket();
     }
 
@@ -203,13 +203,15 @@ class ChatApp {
         } catch (e) { console.error('Send failed', e); }
     }
 
-    async loadHistory() {
+    async loadHistory(isCurrent) {
         const container = this.dom.containers.messages;
         if (!container) return;
         container.innerHTML = '<div class="text-center text-gray-400 mt-4 text-sm">Loading...</div>';
         try {
             const messages = await this.api.getMessages(this.state.currentRoom);
+            if (!isCurrent()) return; // the user moved on while this was loading
             container.innerHTML = '';
+            this.state.shown.clear();
             if (messages.length === 0) container.innerHTML = '<div class="text-center text-gray-400 mt-4 text-sm">No messages yet.</div>';
             else {
                 // FIXED: Wrapped in individual try-catch to prevent one bad message from hiding all history
@@ -225,30 +227,37 @@ class ChatApp {
                 this.scrollToBottom();
             }
         } catch (e) { 
+            if (!isCurrent()) return;
             console.error("History load error:", e);
             container.innerHTML = '<div class="text-center text-red-400 mt-4">Failed to load history</div>'; 
         }
     }
 
     connectWebSocket() {
+        this.disconnectWebSocket();
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/api/ws/${encodeURIComponent(this.state.currentRoom)}`;
         const socket = new WebSocket(wsUrl);
         this.state.socket = socket;
-        socket.onopen = () => this.updateStatus(true);
+        const isCurrent = () => this.state.socket === socket; // false once replaced or closed by us
+
+        // Subscribe first, then load history: anything sent in between arrives on the socket.
+        // Pushes that land while history loads wait in `pending`, then dedupe against it.
+        let pending = [];
+        socket.onopen = async () => {
+            this.updateStatus(true);
+            await this.loadHistory(isCurrent);
+            if (!isCurrent()) return;
+            pending.forEach(msg => this.appendMessage(msg));
+            pending = null;
+            this.scrollToBottom();
+        };
         socket.onclose = () => {
+            if (!isCurrent()) return;
             this.updateStatus(false);
-            // Dropped (node restart, network): retry, reloading history to fill the gap.
-            // A socket we closed on purpose (room switch) is no longer state.socket.
+            // Dropped (node restart, network): retry; the new socket reloads history on open.
             // ponytail: fixed 2s retry, exponential backoff if many clients hammer a dead node.
-            const stillCurrent = () => this.state.socket === socket; // false after a room switch
-            if (stillCurrent()) {
-                setTimeout(async () => {
-                    if (!stillCurrent()) return;
-                    await this.loadHistory();
-                    if (stillCurrent()) this.connectWebSocket();
-                }, 2000);
-            }
+            setTimeout(() => { if (isCurrent()) this.connectWebSocket(); }, 2000);
         };
         socket.onmessage = (event) => {
             try {
@@ -257,6 +266,7 @@ class ChatApp {
                     this.state.knownRooms.add(msg.room_id);
                     this.renderRoomList();
                 }
+                if (pending) return pending.push(msg);
                 this.appendMessage(msg);
                 this.scrollToBottom();
             } catch (e) { console.error("WS Parse Error", e); }
@@ -264,14 +274,14 @@ class ChatApp {
     }
 
     disconnectWebSocket() {
-        if (this.state.socket) {
-            this.state.socket.close();
-            this.state.socket = null;
-        }
+        const socket = this.state.socket;
+        this.state.socket = null; // first, so its onclose knows it was on purpose
+        if (socket) socket.close();
     }
 
     appendMessage(msg) {
-        if (msg.room_id !== this.state.currentRoom) return;
+        if (msg.room_id !== this.state.currentRoom || this.state.shown.has(msg.message_id)) return;
+        this.state.shown.add(msg.message_id);
         
         const container = this.dom.containers.messages;
         if (!container) return;

@@ -19,23 +19,16 @@ def test_get_clock_default():
     assert "not_joined_room" not in node.room_clocks
 
 
-def test_increment_clock():
-    """Verifies that incrementing clock updates current node's counter"""
-    node = NodeState(node_id="alice", room_clocks={})
-    room = "chat1"
+def test_next_clock_is_only_committed_by_update():
+    """next_clock proposes this replica's next entry; nothing moves until update_clock."""
+    node = NodeState(node_id="alice", room_clocks={"chat1": {"bob": 5}})
 
-    new_clock = node.increment_clock(room)
+    proposed = node.next_clock("chat1")
 
-    assert new_clock["alice"] == 1
-    assert node.get_clock(room)["alice"] == 1
-
-    node.room_clocks[room]["bob"] = 5
-    node.increment_clock(room)
-
-    final_clock = node.get_clock(room)
-
-    assert final_clock["alice"] == 2
-    assert final_clock["bob"] == 5
+    assert proposed == {"alice": 1, "bob": 5}
+    assert node.next_clock("chat1") == proposed  # still uncommitted
+    node.update_clock("chat1", proposed)
+    assert node.next_clock("chat1") == {"alice": 2, "bob": 5}
 
 
 def test_update_clock_merge():

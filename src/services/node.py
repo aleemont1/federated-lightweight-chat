@@ -26,10 +26,6 @@ class NodeService:
         self._gossip: Optional[GossipService] = None
         self._tasks: List[asyncio.Task[None]] = []
 
-    def is_initialized(self) -> bool:
-        """Checks if node is active and ready"""
-        return self.state is not None
-
     async def initialize(self, user_id: str) -> None:
         """
         Start node's services for the specified user.
@@ -78,9 +74,12 @@ class NodeService:
             sender_id=self.state.node_id,
             writer_id=self.state.writer_id,
             content=content,
-            vector_clock=self.state.increment_clock(room_id),
+            vector_clock=self.state.next_clock(room_id),
         )
+        # Stored first: if this raises, the clock hasn't moved and the next message reuses the
+        # number. Advancing it anyway would leave a gap no replica could ever fill.
         self.storage.add_message(message)
+        self.state.update_clock(room_id, message.vector_clock)
         await manager.broadcast(message)
         await self._gossip.publish(message)
         return message

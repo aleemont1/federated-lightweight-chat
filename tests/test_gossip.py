@@ -38,9 +38,10 @@ def write(storage, state, room, content):
         sender_id=state.node_id,
         writer_id=state.writer_id,
         content=content,
-        vector_clock=state.increment_clock(room),
+        vector_clock=state.next_clock(room),
     )
     storage.add_message(msg)
+    state.update_clock(room, msg.vector_clock)
     return msg
 
 
@@ -104,7 +105,7 @@ async def test_bob_reply_is_causally_after_what_he_pulled(tmp_path):
         room_id="general",
         sender_id="bob",
         content="answer",
-        vector_clock=b_state.increment_clock("general"),
+        vector_clock=b_state.next_clock("general"),
         created_at=question.created_at - 100,  # Bob's wall clock lies: the answer looks older
     )
     b_storage.add_message(answer)

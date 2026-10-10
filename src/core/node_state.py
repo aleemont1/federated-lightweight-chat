@@ -33,8 +33,9 @@ class NodeState:
         self.room_clocks[room_id] = merged
         return merged
 
-    def increment_clock(self, room_id: str) -> VectorClock:
-        """Increments the vector clock counter of the node in the specified room"""
-        new_clock = increment(self.get_clock(room_id), self.writer_id)
-        self.room_clocks[room_id] = new_clock
-        return new_clock
+    def next_clock(self, room_id: str) -> VectorClock:
+        """
+        The clock of this replica's next message in the room. Not stored: the caller commits
+        it with update_clock once the message is saved, so a failed write burns no sequence number.
+        """
+        return increment(self.get_clock(room_id), self.writer_id)

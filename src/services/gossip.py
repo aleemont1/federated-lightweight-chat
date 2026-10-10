@@ -35,11 +35,16 @@ PUBLISH_TIMEOUT = 1.0
 # A partition black-holes open connections: no reply, no error. The kernel drops a dead one after
 # ~10s instead: keepalive probes catch it when idle (the pub/sub listener), the user timeout when a
 # command awaits its reply. Not socket_timeout: it would also fire on a merely idle listener.
+# Linux names (nodes run in Linux containers); other systems keep what they have, so tests still import.
 KEEPALIVE = {
-    socket.TCP_KEEPIDLE: 5,
-    socket.TCP_KEEPINTVL: 2,
-    socket.TCP_KEEPCNT: 3,
-    socket.TCP_USER_TIMEOUT: 10_000,  # ms
+    getattr(socket, name): value
+    for name, value in (
+        ("TCP_KEEPIDLE", 5),
+        ("TCP_KEEPINTVL", 2),
+        ("TCP_KEEPCNT", 3),
+        ("TCP_USER_TIMEOUT", 10_000),
+    )
+    if hasattr(socket, name)
 }
 
 

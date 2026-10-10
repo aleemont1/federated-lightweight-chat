@@ -37,9 +37,6 @@ def mock_node_service():
     """Patches the global node_service singleton in the routes module."""
     # Use patch.object for robust patching (avoids string path typos)
     with patch.object(src.api.routes, "node_service") as mock_service:
-        # 1. Setup 'is_initialized' (sync method)
-        mock_service.is_initialized.return_value = True
-
         # 2. Setup 'initialize' (async method) -> Must be AsyncMock
         mock_service.initialize = AsyncMock(return_value=None)
 
