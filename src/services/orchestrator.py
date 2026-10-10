@@ -1,106 +1,144 @@
 """
 Containers orchestrator service.
-Manages the lifecycle of dynamic users through the Docker Socket.
+Manages the lifecycle of user nodes through the Docker socket.
 """
 
 import logging
 import re
-from typing import List
+import secrets
+import threading
+from typing import Dict, List, Optional
 
 import docker
-from docker.errors import APIError, NotFound
+import httpx
+from docker.errors import NotFound
 from docker.models.containers import Container
 
+from src.config.settings import settings
+
 logger = logging.getLogger(__name__)
+
+IMAGE = "flc-node:latest"
+NETWORK = "flc-net"
+GATEWAY = "http://flc-gateway"
+NODE_LABEL = "app=flc-node"
+NAME_PREFIX = "flc-node-"
+# A DNS label, so that the username can be the node's subdomain.
+USERNAME_RE = re.compile(r"[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?")
 
 
 class MaxUsersReachedError(Exception):
     """Raised when the maximum number of concurrent user containers is reached."""
 
-    pass
+
+def normalize_username(username: str) -> str:
+    """Lowercases a username and checks it is a valid subdomain. Raises ValueError otherwise."""
+    name = username.strip().lower()
+    if not USERNAME_RE.fullmatch(name):
+        raise ValueError("Usernames are 1-32 letters, digits or '-', and can't start or end with '-'.")
+    return name
 
 
 class OrchestratorService:
     """
     Control plane for FLC.
-    Spawns, monitors and kills user node containers.
+    Spawns, monitors and removes user node containers. Usernames must be normalized.
     """
 
-    def __init__(self, max_users: int = 10, network_name: str = "flc-net"):
+    def __init__(self, max_users: int):
         self.max_users = max_users
-        self.network_name = network_name
         self._client = docker.from_env()
+        # Serializes spawns, so concurrent logins can't race on the same name or on the user limit.
+        # ponytail: one global lock; per-user locks if spawning ever becomes a bottleneck.
+        self._spawn_lock = threading.Lock()
 
-    def _sanitize_username(self, username: str) -> str:
-        """Converts username in a Docker-safe and DNS-safe string"""
-        # lowercase and non-alphanumerics converted to _
-        return re.sub(r"[^a-z0-9]", "_", username.lower()).strip("_")
+    def _find(self, username: str) -> Optional[Container]:
+        try:
+            return self._client.containers.get(NAME_PREFIX + username)
+        except NotFound:
+            return None
 
     def get_active_users(self) -> List[str]:
-        """Returns a list of currently running user nodes"""
-        containers = self._client.containers.list(filters={"label": "app=flc_node"})
-        return [c.name.replace("flc-node-", "") for c in containers]
+        """Usernames of the running user nodes."""
+        containers = self._client.containers.list(filters={"label": NODE_LABEL})
+        return sorted(c.name.removeprefix(NAME_PREFIX) for c in containers)
 
-    def spawn_user_node(self, username: str) -> Container:
+    def is_ready(self, username: str) -> bool:
         """
-        Spawns a Container for the given user.
+        True once the gateway routes to the user's node. Traefik only routes healthy containers,
+        and picks up health changes with a short delay, so "healthy" alone isn't "reachable".
         """
-        safe_name = self._sanitize_username(username)
-        container_name = f"flc-node-{safe_name}"
-
+        host = f"{username}.{settings.public_domain}"
         try:
-            container = self._client.containers.get(container_name)
-            if container.status != "running":
-                logger.info("Restarting existing container for %s", safe_name)
+            response = httpx.get(f"{GATEWAY}/api/health", headers={"Host": host}, timeout=2)
+        except httpx.HTTPError:
+            return False
+        return response.status_code == 200
+
+    def spawn_user_node(self, username: str) -> None:
+        """Starts the user's node, creating it on first login. Idempotent."""
+        with self._spawn_lock:
+            container = self._find(username)
+            if container and self._env(container).get("NODE_TOKEN") is None:
+                container.remove(force=True)  # created before nodes had tokens
+                container = None
+            if container and container.status == "running":
+                return
+
+            active = len(self.get_active_users())
+            if active >= self.max_users:
+                raise MaxUsersReachedError(f"System full ({active}/{self.max_users} users).")
+
+            if container:
+                logger.info("Restarting existing container for %s", username)
                 container.start()
-            return container
-        except NotFound:
-            pass  # proceed to creation
+                return
 
-        active_count = len(self.get_active_users())
-        if active_count >= self.max_users:
-            raise MaxUsersReachedError(f"System full ({active_count}/{self.max_users} users).")
-
-        logger.info("Spawning new node for %s...", safe_name)
-
-        image_name = "flc-node:latest"
-
-        # Traefik configuration labels
-        labels = {
-            "app": "flc-node",
-            "traefik.enable": "true",
-            f"traefik.http.routers.{safe_name}.rule": f"Host(`{safe_name}.localhost`)",
-            f"traefik.http.routers.{safe_name}.entrypoints": "web",
-            f"traefik.http.services.{safe_name}.loadbalancer.server.port": "8000",
-        }
-
-        # Inject ADVERTISED_ADDR so other nodes can reach this one.
-        # Inside the docker network, the container is reachable by its container name.
-        internal_address = f"http://{container_name}:8000"
-
-        env = {
-            "NODE_ID": safe_name,
-            "REDIS_URL": "redis://flc-redis:6379",
-            "DB_NAME": f"/data/{safe_name}.db",
-            "ADVERTISED_ADDR": internal_address,
-        }
-
-        try:
-            container = self._client.containers.run(
-                image=image_name,
-                name=container_name,
+            logger.info("Spawning new node for %s...", username)
+            router = f"flc-{username}"  # prefixed so a user can't shadow the orchestrator's router
+            self._client.containers.run(
+                image=IMAGE,
+                name=NAME_PREFIX + username,
                 detach=True,
-                network=self.network_name,
-                labels=labels,
-                environment=env,
-                volumes={f"flc_data_{safe_name}": {"bind": "/data", "mode": "rw"}},
+                init=True,
+                network=NETWORK,
+                labels={
+                    "app": "flc-node",
+                    "traefik.enable": "true",
+                    # Node-to-node sync stays inside the Docker network.
+                    f"traefik.http.routers.{router}.rule": (
+                        f"Host(`{username}.{settings.public_domain}`) && !PathPrefix(`/api/internal`)"
+                    ),
+                    f"traefik.http.routers.{router}.entrypoints": "web",
+                    f"traefik.http.services.{router}.loadbalancer.server.port": "8000",
+                },
+                environment={
+                    "NODE_ID": username,
+                    "NODE_TOKEN": secrets.token_urlsafe(32),
+                    "REDIS_URL": "redis://flc-redis:6379",
+                    "DB_NAME": f"/data/{username}.db",
+                    # Peers reach each other by container name on the Docker network.
+                    "ADVERTISED_ADDR": f"http://{NAME_PREFIX}{username}:8000",
+                },
+                volumes={f"flc_data_{username}": {"bind": "/data", "mode": "rw"}},
                 restart_policy={"Name": "on-failure", "MaximumRetryCount": 3},
             )
-            return container
-        except APIError as e:
-            logger.error("Docker API Error: %s", str(e))
-            raise RuntimeError(f"Failed to spawn node: {e}")
 
+    @staticmethod
+    def _env(container: Container) -> Dict[str, str]:
+        return dict(var.split("=", 1) for var in container.attrs["Config"]["Env"])
 
-# OrchestratorService singleton
-orchestrator_service = OrchestratorService()
+    def node_token(self, username: str) -> Optional[str]:
+        """The secret the user's node accepts as proof of login, None if the node doesn't exist."""
+        container = self._find(username)
+        return self._env(container).get("NODE_TOKEN") if container else None
+
+    def stop_user_node(self, username: str) -> None:
+        """Stops and removes the user's container. Its data volume is kept for the next login."""
+        container = self._find(username)
+        if not container:
+            logger.warning("Attempted to stop non-existent node: %s", username)
+            return
+        logger.info("Stopping container for %s...", username)
+        container.stop(timeout=5)  # SIGTERM, then SIGKILL after 5s
+        container.remove()

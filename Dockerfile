@@ -59,18 +59,7 @@ RUN /app/venv/bin/pip install -r requirements.txt
 # ==========================================
 FROM python:3.12-slim-bookworm AS runtime
 
-# Installazione Tini
-ENV TINI_VERSION v0.19.0
-ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini /tini
-RUN chmod +x /tini
-
 WORKDIR /app
-
-# Dipendenze runtime minime (sqlite3, curl per healthcheck)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    sqlite3 \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
 
 # Creazione utente non-root
 RUN groupadd -r flcuser && useradd -r -g flcuser flcuser
@@ -85,10 +74,13 @@ ENV PATH="/app/venv/bin:$PATH"
 
 # Copia codice applicativo e asset statici
 COPY src ./src
-COPY scripts ./scripts
 COPY --from=frontend-builder /app/src/static/css/styles.css /app/src/static/css/styles.css
 
-# Permessi
+# Creiamo la cartella /data e assegnamo i permessi a flcuser.
+# Quando Docker monterà il volume, erediterà questi permessi.
+RUN mkdir -p /data && chown -R flcuser:flcuser /data
+
+# Permessi App
 RUN chown -R flcuser:flcuser /app
 
 USER flcuser
@@ -99,10 +91,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 EXPOSE 8000
 
-# Healthcheck
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8000/api/health || exit 1
+# Traefik only routes to healthy containers: probe every second while starting, so a
+# new node is reachable as soon as it's up. Stdlib probe, no curl in the image.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --start-interval=1s --retries=3 \
+  CMD ["python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/api/health', timeout=2)"]
 
-# Entrypoint e Cmd
-ENTRYPOINT ["/tini", "--"]
+# PID 1 signal handling and zombie reaping come from `init: true` (compose) / init=True (orchestrator).
 CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]

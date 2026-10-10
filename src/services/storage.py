@@ -7,14 +7,24 @@ import json
 import logging
 import os
 import sqlite3
-import time
 from contextlib import contextmanager
-from typing import Iterator, List, Optional
+from typing import Dict, Iterator, List, Set, Tuple
 
 from src.core.message import Message, VectorClock
+from src.core.vector_clock import merge
 
 # Configure module logger
 logger = logging.getLogger(__name__)
+
+# Per room, per sender: the highest sequence number held with no gaps below it.
+# A message's sequence number is its sender's own entry in its vector clock.
+Summary = Dict[str, Dict[str, int]]
+
+
+def _to_message(row: sqlite3.Row) -> Message:
+    msg_dict = dict(row)
+    msg_dict["vector_clock"] = json.loads(msg_dict["vector_clock"])
+    return Message(**msg_dict)
 
 
 class StorageService:
@@ -28,35 +38,17 @@ class StorageService:
             db_name: The file path to the SQLite database.
         """
         self.db_name = db_name
-        self._ensure_directory_exists()
+        os.makedirs(os.path.dirname(db_name) or ".", exist_ok=True)
         self._init_db()
-
-    def _ensure_directory_exists(self) -> None:
-        """
-        Internal method to verify the parent directory exists.
-        Creates it recursively if it is missing.
-        """
-        directory = os.path.dirname(self.db_name)
-
-        # If db_name is just "file.db", directory is empty string; no action needed.
-        if directory and not os.path.exists(directory):
-            try:
-                logger.info("Database directory %s not found. Creating it...", directory)
-                os.makedirs(directory, exist_ok=True)
-            except OSError as e:
-                logger.error("Failed to create database directory %s: %s", directory, e)
-                # Re-raise to prevent application starting in an unstable state
-                raise
 
     @contextmanager
     def _get_conn(self) -> Iterator[sqlite3.Connection]:
         """
         Context manager for database connections.
-        Ensures proper closure and foreign key enforcement.
+        Ensures proper closure.
         """
         # Connect to the DB. This will fail if the directory doesn't exist/isn't writable.
         conn = sqlite3.connect(self.db_name)
-        conn.execute("PRAGMA foreign_keys = ON;")
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -66,20 +58,7 @@ class StorageService:
     def _init_db(self) -> None:
         """Initializes the database schema."""
         with self._get_conn() as conn:
-            cursor = conn.cursor()
-
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS room_peers (
-                    room_id TEXT,
-                    peer_url TEXT,
-                    last_seen REAL,
-                    PRIMARY KEY (room_id, peer_url)
-                    )
-                """
-            )
-
-            cursor.execute(
+            conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS messages (
                     message_id TEXT PRIMARY KEY,
@@ -91,56 +70,25 @@ class StorageService:
                     )
                 """
             )
-
-            cursor.execute(
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id)")
+            # If a happened-before b, then vc(a) <= vc(b) with one entry strictly smaller,
+            # so sum(vc(a)) < sum(vc(b)). Ordering by (clock_sum, created_at, sender_id, message_id)
+            # is therefore a causal order, and deterministic, so identical on every replica.
+            conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS snapshots (
-                    room_id TEXT PRIMARY KEY,
-                    vector_clock TEXT,
-                    last_processed_time REAL
-                    )
-                """
-            )
-
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_messages_created_at
-                    ON messages(created_at)
+                CREATE VIEW IF NOT EXISTS causal_messages AS
+                    SELECT *, (SELECT SUM(value) FROM json_each(vector_clock)) AS clock_sum FROM messages
                 """
             )
-
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_messages_room_id
-                    ON messages(room_id)
-                """
-            )
-
             conn.commit()
 
-    def message_exists(self, message_id: str) -> bool:
+    def add_message(self, message: Message) -> bool:
         """
-        Checks if a message exists.
-        Used for idempotency during replication
-        """
-        with self._get_conn() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT 1 FROM messages WHERE message_id = ?
-                """,
-                (message_id,),
-            )
-            return cursor.fetchone() is not None
-
-    def add_message(self, message: Message) -> None:
-        """
-        Inserts a new message in the local storage.
+        Inserts a message in the local storage.
+        Returns False if it was already stored (replication is idempotent).
         """
         with self._get_conn() as conn:
-            cursor = conn.cursor()
-            vc_json = json.dumps(message.vector_clock)
-            cursor.execute(
+            cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO messages
                     (message_id, room_id, sender_id, content, vector_clock, created_at)
@@ -151,196 +99,81 @@ class StorageService:
                     message.room_id,
                     message.sender_id,
                     message.content,
-                    vc_json,
+                    json.dumps(message.vector_clock),
                     message.created_at,
                 ),
             )
             conn.commit()
+            return cursor.rowcount == 1
 
-    def save_snapshot(self, room_id: str, vector_clock: VectorClock) -> None:
+    def get_room_messages(self, room_id: str, limit: int = 50, offset: int = 0) -> List[Message]:
         """
-        Saves the current vector clock state for a room.
-        """
-        with self._get_conn() as conn:
-            cursor = conn.cursor()
-            vc_json = json.dumps(vector_clock)
-            current_time = time.time()
-            cursor.execute(
-                """
-                INSERT OR REPLACE INTO snapshots
-                    (room_id, vector_clock, last_processed_time)
-                    VALUES (?, ?, ?)
-                """,
-                (room_id, vc_json, current_time),
-            )
-            conn.commit()
-
-    def load_snapshot(self, room_id: str) -> tuple[Optional[VectorClock], float]:
-        """
-        Loads the latest snapshot for a room.
-        Returns: (VectorClock, last_processed_time) or (None, 0.0)
+        Returns a page of a room's history in causal order.
+        offset counts back from the newest message, so offset=0 is the latest page.
         """
         with self._get_conn() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
+            rows = conn.execute(
                 """
-                SELECT vector_clock, last_processed_time
-                    FROM snapshots
-                    WHERE room_id = ?
-                """,
-                (room_id,),
-            )
-
-            row = cursor.fetchone()
-            if row:
-                return json.loads(row["vector_clock"]), row["last_processed_time"]
-            return None, 0.0
-
-    def get_all_messages(self, limit: int = 100, offset: int = 0) -> List[Message]:
-        """Retreives all messages and converts them to Pydantic objects"""
-        with self._get_conn() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT * FROM messages
-                    ORDER BY created_at ASC
+                SELECT * FROM (
+                    SELECT * FROM causal_messages WHERE room_id = ?
+                    ORDER BY clock_sum DESC, created_at DESC, sender_id DESC, message_id DESC
                     LIMIT ? OFFSET ?
-                """,
-                (limit, offset),
-            )
-            rows = cursor.fetchall()
-
-            messages = []
-
-            for row in rows:
-                msg_dict = dict(row)
-                msg_dict["vector_clock"] = json.loads(msg_dict["vector_clock"])
-                messages.append(Message(**msg_dict))
-
-        return messages
-
-    def get_all_room_messages(self, room_id: str, limit: int = 100, offset: int = 0) -> List[Message]:
-        """Retreives all messages and converts them to Pydantic objects"""
-        with self._get_conn() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT * FROM messages
-                    WHERE room_id = ?
-                    ORDER BY created_at ASC
-                    LIMIT ? OFFSET ?
+                ) ORDER BY clock_sum, created_at, sender_id, message_id
                 """,
                 (room_id, limit, offset),
-            )
-            rows = cursor.fetchall()
-
-            messages = []
-
-            for row in rows:
-                msg_dict = dict(row)
-                msg_dict["vector_clock"] = json.loads(msg_dict["vector_clock"])
-                messages.append(Message(**msg_dict))
-
-        return messages
-
-    def get_messages_after(self, room_id: str, timestamp: float) -> List[Message]:
-        """
-        Retrieves messages for a room that arrived AFTER a specific timestamp.
-        Used to replay the 'delta' after the last snapshot
-        """
-        with self._get_conn() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT * FROM messages
-                    WHERE room_id = ? AND created_at > ?
-                    ORDER BY created_at ASC
-                """,
-                (room_id, timestamp),
-            )
-
-            rows = cursor.fetchall()
-            messages = []
-            for row in rows:
-                msg_dict = dict(row)
-                msg_dict["vector_clock"] = json.loads(msg_dict["vector_clock"])
-                messages.append(Message(**msg_dict))
-
-            return messages
-
-    def get_all_room_ids(self) -> List[str]:
-        with self._get_conn() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT room_id FROM messages
-                UNION
-                SELECT room_id FROM snapshots
-                """
-            )
-
-            return [row["room_id"] for row in cursor.fetchall()]
+            ).fetchall()
+        return [_to_message(row) for row in rows]
 
     def get_known_rooms(self) -> List[str]:
         """
         Retrieves a list of all room IDs that have at least one message.
         """
         with self._get_conn() as conn:
-            cursor = conn.cursor()
-            # DISTINCT ensures we get a clean list of rooms
-            cursor.execute(
-                """
-                SELECT DISTINCT room_id FROM messages
-                ORDER BY room_id ASC
-                """
-            )
-            return [row["room_id"] for row in cursor.fetchall()]
+            rows = conn.execute("SELECT DISTINCT room_id FROM messages ORDER BY room_id ASC").fetchall()
+        return [row["room_id"] for row in rows]
 
-    def get_latest_clock(self, node_id: str) -> int:
+    def room_clocks(self) -> Dict[str, VectorClock]:
+        """Rebuilds each room's vector clock as the merge of its messages' clocks."""
+        clocks: Dict[str, VectorClock] = {}
+        with self._get_conn() as conn:
+            for row in conn.execute("SELECT room_id, vector_clock FROM messages"):
+                clocks[row["room_id"]] = merge(
+                    clocks.get(row["room_id"], {}), json.loads(row["vector_clock"])
+                )
+        return clocks
+
+    # ponytail: summary() and missing_messages() scan the whole table on every gossip round.
+    # Fine for a chat of a few thousand messages; past that, persist a per-(room, sender) watermark.
+    def summary(self) -> Summary:
+        """What this replica holds: per room and sender, the highest gap-free sequence number."""
+        seqs: Dict[Tuple[str, str], Set[int]] = {}
+        with self._get_conn() as conn:
+            for row in conn.execute("SELECT room_id, sender_id, vector_clock FROM messages"):
+                seq = json.loads(row["vector_clock"]).get(row["sender_id"], 0)
+                seqs.setdefault((row["room_id"], row["sender_id"]), set()).add(seq)
+
+        summary: Summary = {}
+        for (room_id, sender_id), held in seqs.items():
+            top = 0
+            while top + 1 in held:
+                top += 1
+            summary.setdefault(room_id, {})[sender_id] = top
+        return summary
+
+    def missing_messages(self, have: Summary, limit: int = 500) -> List[Message]:
         """
-        Retreives the highest counter known for this node.
-        Useful to restore the clock at 0 at each restart.
+        Messages that a replica with summary `have` lacks, in causal order.
+        Causal order puts each sender's lowest missing sequence first, so every
+        batch closes the requester's gaps even when capped by `limit`.
         """
+        missing: List[Message] = []
         with self._get_conn() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT vector_clock FROM messages
-                """
-            )
-            rows = cursor.fetchall()
-
-            max_counter = 0
-            for row in rows:
-                vc = json.loads(row["vector_clock"])
-                max_counter = max(vc.get(node_id, 0), max_counter)
-        return max_counter
-
-    def get_peers(self, room_id: str) -> List[str]:
-        """Get all known peers in a room."""
-        with self._get_conn() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT peer_url FROM room_peers
-                    WHERE room_id = ?
-                """,
-                (room_id,),
-            )
-
-            peers = [row["peer_url"] for row in cursor.fetchall()]
-            return peers
-
-    def add_peer(self, room_id: str, peer_url: str) -> None:
-        """Add a new peer inside the specified room"""
-        with self._get_conn() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT OR REPLACE INTO room_peers
-                    (room_id, peer_url, last_seen)
-                    VALUES (?, ?, ?)
-                """,
-                (room_id, peer_url, time.time()),
-            )
-            conn.commit()
+            for row in conn.execute(
+                "SELECT * FROM causal_messages ORDER BY clock_sum, created_at, sender_id, message_id"
+            ):
+                msg = _to_message(row)
+                if msg.vector_clock.get(msg.sender_id, 0) > have.get(msg.room_id, {}).get(msg.sender_id, 0):
+                    missing.append(msg)
+                    if len(missing) >= limit:
+                        break
+        return missing

@@ -1,147 +1,124 @@
 """
 Unit tests for the NodeService.
-Tests lifecycle management, state recovery, and interaction with sub-services.
+Real SQLite storage; GossipService (Redis + network) and the WebSocket manager are mocked.
 """
 
-# pylint: disable=redefined-outer-name
-# pylint: disable=unused-argument
-
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.services.node import LocalNodeService
+from src.core.message import Message
+from src.services.node import NodeService
+from src.services.storage import StorageService
 
 
-# Fixture to provide a fresh instance of the service for each test
 @pytest.fixture
-def node_service():
-    """Fixture that provides a fresh LocalNodeService instance."""
-    return LocalNodeService()
+def db_path(tmp_path):
+    """Path of the node DB, pre-populated by some tests."""
+    return str(tmp_path / "node.db")
 
 
-# Helper to mock dependencies consistently and fix the Async/Sync mismatch
 @pytest.fixture
-def mock_dependencies():
-    """
-    Fixture that mocks StorageService, GossipService, and settings.
-    Configures the GossipService.start method to be an AsyncMock.
-    """
+def mocks(db_path):
+    """Patches the node's collaborators; yields (gossip_cls, manager)."""
     with (
-        patch("src.services.node.StorageService") as mock_storage_cls,
-        patch("src.services.node.GossipService") as mock_gossip_cls,
-        patch("src.services.node.settings"),
+        patch("src.services.node.GossipService") as gossip_cls,
+        patch("src.services.node.manager") as manager,
+        patch("src.services.node.settings.db_name", db_path),
     ):
-
-        # --- Configure Gossip Mock ---
-        mock_gossip_instance = mock_gossip_cls.return_value
-
-        # This satisfies asyncio.create_task(self._gossip.start())
-        mock_gossip_instance.start = AsyncMock()
-
-        # 'stop' is synchronous, so a standard MagicMock is fine.
-        mock_gossip_instance.stop = MagicMock()
-
-        # --- Configure Storage Mock ---
-        mock_storage_instance = mock_storage_cls.return_value
-        # Default behavior: empty rooms to avoid iteration errors
-        mock_storage_instance.get_all_room_ids.return_value = []
-
-        # Return the mocks so tests can customize return values
-        yield mock_storage_cls, mock_gossip_cls
+        gossip = gossip_cls.return_value
+        gossip.sync_once = AsyncMock()
+        gossip.run = AsyncMock()
+        gossip.listen = AsyncMock()
+        gossip.publish = AsyncMock()
+        gossip.close = AsyncMock()
+        manager.broadcast = AsyncMock()
+        yield gossip_cls, manager
 
 
 @pytest.mark.asyncio
-async def test_initialize_success(node_service, mock_dependencies):
-    """Test successful initialization flow."""
-    (
-        mock_storage_cls,
-        mock_gossip_cls,
-    ) = mock_dependencies
-    gossip_instance = mock_gossip_cls.return_value
-    storage_instance = mock_storage_cls.return_value
+async def test_initialize_catches_up_before_starting_loops(mocks):
+    """Initial anti-entropy round runs before the background loops."""
+    gossip_cls, _ = mocks
+    node = NodeService()
 
-    await node_service.initialize("test_user")
+    await node.initialize("alice")
 
-    assert node_service.is_initialized()
-    assert node_service.state.node_id == "test_user"
-
-    assert node_service.storage is storage_instance
-    # Verify Gossip started correctly
-    mock_gossip_cls.assert_called_once()
-    gossip_instance.start.assert_called_once()
+    gossip = gossip_cls.return_value
+    gossip.sync_once.assert_awaited_once()
+    gossip.run.assert_called_once()
+    gossip.listen.assert_called_once()
+    assert gossip_cls.call_args.kwargs["on_message"] == node.ingest
+    await node.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_initialize_idempotency_and_conflict(node_service, mock_dependencies):
-    """Test initialization guards (Idempotency and Conflict)."""
-    # 1. First Init
-    await node_service.initialize("user_a")
-    assert node_service.state.node_id == "user_a"
-
-    # 2. Same User -> Should just return (no error)
-    await node_service.initialize("user_a")
-
-    # 3. Different User -> Should Raise Error
+async def test_initialize_idempotency_and_conflict(mocks):
+    """Same user is a no-op, a different user is refused."""
+    node = NodeService()
+    await node.initialize("user_a")
+    await node.initialize("user_a")
     with pytest.raises(ValueError, match="Node is already initialized"):
-        await node_service.initialize("user_b")
+        await node.initialize("user_b")
+    await node.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_state_recovery_snapshot_and_delta(node_service, mock_dependencies):
-    """Test the 'Smart Recovery' logic with Snapshot + Delta."""
-    mock_storage_cls, _ = mock_dependencies
-    storage_instance = mock_storage_cls.return_value
+async def test_clocks_are_rebuilt_from_history(mocks, db_path):
+    """After a restart the next message continues the sender's sequence."""
+    StorageService(db_path).add_message(
+        Message(room_id="lobby", sender_id="alice", content="old", vector_clock={"alice": 10, "bob": 5})
+    )
+    node = NodeService()
+    await node.initialize("alice")
 
-    # Setup Data for Recovery
-    # 1. Simulate finding a room "lobby"
-    storage_instance.get_all_room_ids.return_value = ["lobby"]
+    sent = await node.send("lobby", "new")
 
-    # 2. Simulate loading a snapshot for that room
-    # Returns (VectorClock, timestamp)
-    storage_instance.load_snapshot.return_value = ({"alice": 10, "bob": 5}, 100.0)
-
-    # 3. Simulate finding new messages after the snapshot (Delta)
-    mock_msg = MagicMock()
-    mock_msg.vector_clock = {"alice": 11, "bob": 5}
-    storage_instance.get_messages_after.return_value = [mock_msg]
-
-    # Action
-    await node_service.initialize("alice")
-
-    # Assertions
-    state = node_service.state
-    assert "lobby" in state.room_clocks
-    # Expect: alice=11 (from delta), bob=5 (from snapshot)
-    assert state.room_clocks["lobby"] == {"alice": 11, "bob": 5}
-
-    # Verify Storage calls
-    storage_instance.load_snapshot.assert_called_with("lobby")
-    storage_instance.get_messages_after.assert_called_with("lobby", 100.0)
+    assert sent.vector_clock == {"alice": 11, "bob": 5}
+    await node.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_shutdown_lifecycle(node_service, mock_dependencies):
-    """Test graceful shutdown."""
-    mock_storage_cls, mock_gossip_cls = mock_dependencies
-    gossip_instance = mock_gossip_cls.return_value
-    storage_instance = mock_storage_cls.return_value
+async def test_send_stores_shows_and_publishes(mocks):
+    """Local messages reach local sockets once and are published."""
+    gossip_cls, manager = mocks
+    node = NodeService()
+    await node.initialize("alice")
 
-    # Init first to set up state
-    await node_service.initialize("user1")
+    sent = await node.send("general", "hi")
 
-    # Inject some state to be saved
-    node_service.state.room_clocks["room_X"] = {"u1": 99}
+    assert node.storage.get_room_messages("general") == [sent]
+    manager.broadcast.assert_awaited_once_with(sent)
+    gossip_cls.return_value.publish.assert_awaited_once_with(sent)
+    await node.shutdown()
 
-    # Action
-    await node_service.shutdown()
 
-    # Assertions
-    assert not node_service.is_initialized()
-    assert node_service.state is None
+@pytest.mark.asyncio
+async def test_ingest_is_idempotent(mocks):
+    """The same message via pub/sub and anti-entropy is stored and shown once, and merges the clock."""
+    _, manager = mocks
+    node = NodeService()
+    await node.initialize("alice")
+    remote = Message(room_id="general", sender_id="bob", content="yo", vector_clock={"bob": 3})
 
-    # Verify Gossip stopped
-    gossip_instance.stop.assert_called_once()
+    await node.ingest(remote)
+    await node.ingest(remote)
 
-    # Verify Snapshot saved
-    storage_instance.save_snapshot.assert_called_with("room_X", {"u1": 99})
+    manager.broadcast.assert_awaited_once_with(remote)
+    assert node.state.get_clock("general") == {"alice": 0, "bob": 3}
+    await node.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_lifecycle(mocks):
+    """Shutdown cancels the loops and leaves discovery."""
+    gossip_cls, _ = mocks
+    node = NodeService()
+    await node.initialize("user1")
+    tasks = list(node._tasks)
+
+    await node.shutdown()
+
+    assert not node.is_initialized()
+    assert all(t.done() for t in tasks)
+    gossip_cls.return_value.close.assert_awaited_once()

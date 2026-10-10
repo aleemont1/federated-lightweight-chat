@@ -1,170 +1,99 @@
 """
-Node controllers, allows to centralize the node's services in
-a structured and coherent object.
+Node controller: centralizes the node's storage, clocks and replication
+in a single object.
 """
 
 import asyncio
 import logging
-from abc import ABC, abstractmethod
-from typing import Optional
+from typing import List, Optional
 
 from src.config.settings import settings
+from src.core.message import Message
 from src.core.node_state import NodeState
 from src.services.gossip import GossipService
 from src.services.storage import StorageService
+from src.services.websocket import manager
 
 logger = logging.getLogger(__name__)
 
 
-class INodeService(ABC):
-    """
-    Abstract Interface for node's management service.
-    Defines the contract for the node's state initialization
-    and management.
-    """
+class NodeService:
+    """Owns the node's replica: storage, in-memory vector clocks and the replication tasks."""
 
-    @property
-    @abstractmethod
-    def state(self) -> Optional[NodeState]:
-        """Returns the current node's state (if set)"""
-        pass
+    def __init__(self) -> None:
+        self.state: Optional[NodeState] = None
+        self.storage: Optional[StorageService] = None
+        self._gossip: Optional[GossipService] = None
+        self._tasks: List[asyncio.Task[None]] = []
 
-    @property
-    @abstractmethod
-    def storage(self) -> Optional[StorageService]:
-        """Returns the active storage service (if set)"""
-        pass
-
-    @abstractmethod
     def is_initialized(self) -> bool:
         """Checks if node is active and ready"""
-        pass
+        return self.state is not None
 
-    @abstractmethod
     async def initialize(self, user_id: str) -> None:
         """
         Start node's services for the specified user.
-        Configures DB, restores state and starts gossip.
+        Opens the DB, rebuilds the clocks from it, catches up with peers and starts replication.
         """
-        pass
-
-    @abstractmethod
-    async def sync_room(self, room_id: str) -> None:
-        """Triggers a manual sync for a room."""
-        pass
-
-    @abstractmethod
-    async def shutdown(self) -> None:
-        """
-        Gracefully shuts the node down, cleaning resources.
-        """
-        pass
-
-
-class LocalNodeService(INodeService):
-    """
-    Local implementation with manual initialization,
-    created to develop and test API routes before implementing
-    the whole user management and node orchestration services.
-    """
-
-    def __init__(self) -> None:
-        self._state: Optional[NodeState] = None
-        self._storage: Optional[StorageService] = None
-        self._gossip: Optional[GossipService] = None
-        self._gossip_task: Optional[asyncio.Task[None]] = None
-
-    @property
-    def state(self) -> Optional[NodeState]:
-        return self._state
-
-    @property
-    def storage(self) -> Optional[StorageService]:
-        return self._storage
-
-    def is_initialized(self) -> bool:
-        return self._state is not None
-
-    async def initialize(self, user_id: str) -> None:
-        if self.is_initialized():
-            if self._state and self._state.node_id != user_id:
-                raise ValueError(f"Node is already initialized as {self._state.node_id}")
+        if self.state:
+            if self.state.node_id != user_id:
+                raise ValueError(f"Node is already initialized as {self.state.node_id}")
             return
 
         logger.info("Initializing node for user: %s", user_id)
+        self.storage = StorageService(settings.db_name or f"{user_id}.db")
+        self.state = NodeState(node_id=user_id, room_clocks=self.storage.room_clocks())
+        logger.info("State restored. Active rooms: %s", list(self.state.room_clocks))
 
-        db_path = settings.db_name or f"{user_id}.db"
-        self._storage = StorageService(db_path)
+        self._gossip = GossipService(
+            storage=self.storage,
+            node_id=user_id,
+            node_addr=settings.advertised_addr,
+            on_message=self.ingest,
+        )
+        # Catch up before serving: a node whose DB was lost must learn its own past
+        # sequence numbers before it sends, or it would reuse them.
+        # ponytail: best effort, if no peer is reachable now the node starts from what it has.
+        await self._gossip.sync_once()
+        self._tasks = [asyncio.create_task(self._gossip.run()), asyncio.create_task(self._gossip.listen())]
 
-        self._state = NodeState(node_id=user_id, room_clocks={})
+    async def ingest(self, message: Message) -> None:
+        """Applies a message received from a peer. Idempotent, so both replication paths can deliver it."""
+        if not self.state or not self.storage:
+            return
+        if self.storage.add_message(message):
+            self.state.update_clock(message.room_id, message.vector_clock)
+            await manager.broadcast(message)
 
-        # Restore state if there is any saved.
-        if self._storage:
-            room_ids = self._storage.get_all_room_ids()
-
-            if self._state:
-                for room_id in room_ids:
-                    self._state.join_room(room_id)
-
-                    snapshot_clock, last_time = self._storage.load_snapshot(room_id)
-                    if snapshot_clock:
-                        self._state.update_clock(room_id, snapshot_clock)
-                        logger.debug("Loaded snapshot for %s (timestamp: %s)", room_id, last_time)
-
-                    delta_messages = self._storage.get_messages_after(room_id, last_time)
-                    if delta_messages:
-                        logger.info("Replaying %d messages for room %s", len(delta_messages), room_id)
-                        for msg in delta_messages:
-                            self._state.update_clock(room_id, msg.vector_clock)
-
-                logger.info("State restored. Active rooms: %s", list(self._state.room_clocks.keys()))
-
-        await self._start_gossip(user_id)
-
-    async def sync_room(self, room_id: str) -> None:
-        """Manually pulls data for a room from peers."""
-        if self._gossip:
-            # We fire and wait, or fire and forget?
-            # For UI responsiveness, waiting is better so we can refresh the list after.
-            await self._gossip.sync_room_messages(room_id)
-        else:
-            logger.warning("Cannot sync room %s: Gossip service not active", room_id)
-
-    async def _start_gossip(self, user_id: str) -> None:
-        peers_list = [p.strip() for p in settings.peers.split(",") if p.strip()]
-        my_addr = settings.advertised_addr or f"http://localhost:{settings.server_port}"
-
-        if self._storage:
-            self._gossip = GossipService(
-                storage=self._storage, node_id=user_id, node_addr=my_addr, peers=peers_list
-            )
-            if self._gossip:
-                self._gossip_task = asyncio.create_task(self._gossip.start())
+    async def send(self, room_id: str, content: str) -> Message:
+        """Creates a message authored by this node, stores it and replicates it."""
+        if not self.state or not self.storage or not self._gossip:
+            raise RuntimeError("Node not initialized")
+        message = Message(
+            room_id=room_id,
+            sender_id=self.state.node_id,
+            content=content,
+            vector_clock=self.state.increment_clock(room_id),
+        )
+        self.storage.add_message(message)
+        await manager.broadcast(message)
+        await self._gossip.publish(message)
+        return message
 
     async def shutdown(self) -> None:
-        """Graceful shutdown with Snapshot saving."""
+        """Stops replication and releases resources. All state is already on disk."""
         logger.info("Shutting down services...")
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        if self._gossip:
+            await self._gossip.close()
 
-        # 1. Stop Gossip
-        if self._gossip_task:
-            if self._gossip:
-                self._gossip.stop()  # Assumi che GossipService abbia un metodo stop
-            self._gossip_task.cancel()
-            try:
-                await self._gossip_task
-            except asyncio.CancelledError:
-                pass
-
-        # 2. Save Snapshots (Critical for fast restart)
-        if self._state and self._storage:
-            logger.info("Saving state snapshots...")
-            for room_id, clock in self._state.room_clocks.items():
-                self._storage.save_snapshot(room_id, clock)
-
-        self._state = None
-        self._storage = None
+        self.state = None
+        self.storage = None
         self._gossip = None
+        self._tasks = []
         logger.info("Node shutdown complete.")
 
 
-node_service: INodeService = LocalNodeService()
+node_service = NodeService()

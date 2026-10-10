@@ -17,22 +17,6 @@
 
     <div id="app" class="w-full h-full md:h-[90vh] md:max-w-[95%] bg-white shadow-2xl rounded-xl overflow-hidden relative">
         
-        <div id="login-view" class="absolute inset-0 z-50 bg-gray-50 flex flex-col items-center justify-center p-4">
-            <div class="bg-white p-8 rounded-xl shadow-lg w-full max-w-md text-center">
-                <h1 class="text-3xl font-bold text-primary mb-2">FLC</h1>
-                <p class="text-gray-500 mb-6">Federated Lightweight Chat</p>
-                <div class="space-y-4">
-                    <input type="text" id="username-input" 
-                        class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary outline-none transition"
-                        placeholder="Enter your username..." />
-                    <button id="login-btn" 
-                        class="w-full bg-primary hover:bg-blue-600 text-white font-bold py-3 rounded-lg transition transform active:scale-95">
-                        Join Node
-                    </button>
-                </div>
-            </div>
-        </div>
-
         <div id="chat-view" class="flex w-full h-full hidden">
             
             <aside id="chat-sidebar" class="w-64 bg-slate-50 border-r border-gray-200 flex flex-col h-full z-20 absolute md:relative hidden">
@@ -62,9 +46,14 @@
                             <span id="user-info" class="font-medium text-sm truncate">User</span>
                         </div>
                     </div>
-                    <button id="logout-btn" class="w-full text-xs font-medium text-red-500 hover:text-red-700 hover:bg-red-50 py-2 rounded border border-red-200 transition">
-                        Logout
-                    </button>
+                    <!-- Logout stops this node: posted to the orchestrator, action set by app.js -->
+                    <form id="logout-form" method="post">
+                        <input type="hidden" name="username" id="logout-username">
+                        <input type="hidden" name="token" id="logout-token">
+                        <button type="submit" class="w-full text-xs font-medium text-red-500 hover:text-red-700 hover:bg-red-50 py-2 rounded border border-red-200 transition">
+                            Logout
+                        </button>
+                    </form>
                 </div>
             </aside>
 

@@ -1,93 +1,113 @@
 """
-Orchestrator API.
-The landing page and login handler for the Federated Chat.
+Orchestrator API: landing page, login (starts the user's node) and logout (removes it).
+Endpoints are sync on purpose: Docker SDK calls block, so FastAPI runs them in its threadpool.
 """
 
-from typing import Any
+import contextlib
+import hmac
+import logging
+from functools import cache
+from typing import Dict, Optional
 
-from fastapi import FastAPI, Form, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import Depends, FastAPI, Form, Request, status
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
-from src.services.orchestrator import MaxUsersReachedError, orchestrator_service
+from src.config.settings import settings
+from src.services.accounts import Accounts
+from src.services.orchestrator import MaxUsersReachedError, OrchestratorService, normalize_username
+
+logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="FLC Orchestrator")
-
-# We reuse the static files for the login css
 app.mount("/static", StaticFiles(directory="src/static"), name="static")
+templates = Jinja2Templates(directory="src/templates")
 
-# Simple HTML template for the landing page
-LANDING_HTML = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FLC Federation</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-slate-900 text-white h-screen flex flex-col items-center justify-center p-4">
-    <div class="max-w-md w-full bg-slate-800 p-8 rounded-xl shadow-2xl border border-slate-700">
-        <h1 class="text-3xl font-bold text-blue-500 mb-2 text-center">FLC Network</h1>
-        <p class="text-slate-400 mb-8 text-center">Federated Lightweight Chat Gateway</p>
-        <form action="/login" method="post" class="space-y-6">
-            <div>
-                <label class="block text-sm font-medium mb-2">Node Identity (Username)</label>
-                <input type="text" name="username" required
-                    class="w-full bg-slate-900 border border-slate-600
-                    rounded px-4 py-3 focus:border-blue-500 outline-none transition"
-                    placeholder="alice">
-            </div>
 
-            <button type="submit"
-                class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3
-                rounded-lg transition transform active:scale-95">
-                Launch Node & Login
-            </button>
-        </form>
+@cache
+def get_orchestrator() -> OrchestratorService:
+    """Created on first request, so importing this module doesn't need a Docker daemon."""
+    return OrchestratorService(max_users=settings.max_users)
 
-        <div class="mt-6 border-t border-slate-700 pt-4">
-            <h3 class="text-xs font-bold text-slate-500 uppercase mb-2">Active Nodes</h3>
-            <ul class="text-sm text-blue-400 space-y-1">
-                {% for user in active_users %}
-                <li><a href="http://{{ user }}.localhost" class="hover:underline">🟢 {{ user }}</a></li>
-                {% else %}
-                <li class="text-slate-600 italic">No active nodes</li>
-                {% endfor %}
-            </ul>
-        </div>
-    </div>
-</body>
-</html>
-"""
+
+@cache
+def get_accounts() -> Accounts:
+    """The account store, opened on first request."""
+    return Accounts(settings.accounts_db)
+
+
+def _landing(
+    request: Request, orch: OrchestratorService, error: Optional[str] = None, code: int = 200
+) -> HTMLResponse:
+    context = {"active_users": orch.get_active_users(), "domain": settings.public_domain, "error": error}
+    return templates.TemplateResponse(request, "landing.html", context, status_code=code)
 
 
 @app.get("/", response_class=HTMLResponse)
-async def landing_page() -> Any:
-    """Renders the landing page with active nodes list."""
-    from jinja2 import Template
-
-    t = Template(LANDING_HTML)
-    active = orchestrator_service.get_active_users()
-    return t.render(active_users=active)
+def read_root(request: Request, orch: OrchestratorService = Depends(get_orchestrator)) -> HTMLResponse:
+    """Landing page: lists active users and allows login/logout."""
+    return _landing(request, orch)
 
 
 @app.post("/login")
-async def login(username: str = Form(...)) -> RedirectResponse:
+def login(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    orch: OrchestratorService = Depends(get_orchestrator),
+    accounts: Accounts = Depends(get_accounts),
+) -> Response:
     """
-    Spawns a container for the user and redirects to their subdomain.
+    Checks the password (the first login claims the username), starts the user's node and
+    answers with the loading page, which carries the node's login link. It's the POST response
+    rather than a redirect target, so nobody can fetch someone else's link with a plain GET.
     """
     try:
-        orchestrator_service.spawn_user_node(username)
-
-        # Sanitize name for the URL redirection
-        safe_name = orchestrator_service._sanitize_username(username)
-
-        # Redirect to the user's specific subdomain
-        # Note: In production, this requires wildcard DNS or host file entry
-        return RedirectResponse(url=f"http://{safe_name}.localhost", status_code=303)
-
+        name = normalize_username(username)
+        if not accounts.login(name, password):
+            return _landing(request, orch, "Wrong username or password.", status.HTTP_401_UNAUTHORIZED)
+        orch.spawn_user_node(name)
+    except ValueError as e:
+        return _landing(request, orch, str(e), status.HTTP_400_BAD_REQUEST)
     except MaxUsersReachedError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return _landing(request, orch, str(e), status.HTTP_503_SERVICE_UNAVAILABLE)
+    # ponytail: the token travels in the URL once (history, proxy logs); the node swaps it for a cookie.
+    node_url = f"http://{name}.{settings.public_domain}/api/auth?token={orch.node_token(name)}"
+    return templates.TemplateResponse(request, "loading.html", {"user": name, "node_url": node_url})
+
+
+@app.get("/status/{user}")
+def node_status(user: str, orch: OrchestratorService = Depends(get_orchestrator)) -> Dict[str, bool]:
+    """Polled by the loading page."""
+    with contextlib.suppress(ValueError):
+        return {"ready": orch.is_ready(normalize_username(user))}
+    return {"ready": False}
+
+
+@app.post("/logout")
+def logout(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(""),
+    token: str = Form(""),
+    orch: OrchestratorService = Depends(get_orchestrator),
+    accounts: Accounts = Depends(get_accounts),
+) -> Response:
+    """
+    Stops and removes the user's node. Proof is the password (landing page)
+    or the node's token (the logout button inside the chat).
+    """
+    try:
+        name = normalize_username(username)
+    except ValueError:
+        return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)  # can't have a node
+    node_token = orch.node_token(name)
+    if node_token is None:
+        return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)  # nothing to stop
+
+    has_token = bool(token) and hmac.compare_digest(token.encode(), node_token.encode())
+    if not (has_token or accounts.verify(name, password)):
+        return _landing(request, orch, "Wrong username or password.", status.HTTP_401_UNAUTHORIZED)
+    orch.stop_user_node(name)
+    return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)

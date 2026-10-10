@@ -1,4 +1,4 @@
-import { ApiClient } from './api.js';
+import { ApiClient, ORCHESTRATOR_URL } from './api.js';
 
 class ChatApp {
     constructor() {
@@ -9,26 +9,21 @@ class ChatApp {
             currentRoom: 'general',
             socket: null,
             knownRooms: new Set(['general']),
-            unreadCounts: {},
             isSidebarOpen: window.innerWidth >= 768, 
         };
 
         this.dom = {
             views: {
-                login: document.getElementById('login-view'),
                 chat: document.getElementById('chat-view'),
                 sidebar: document.getElementById('chat-sidebar'),
                 overlay: document.getElementById('mobile-overlay')
             },
             inputs: {
-                username: document.getElementById('username-input'),
                 message: document.getElementById('message-input'),
                 newRoom: document.getElementById('new-room-input')
             },
             buttons: {
-                login: document.getElementById('login-btn'),
                 send: document.getElementById('send-btn'),
-                logout: document.getElementById('logout-btn'),
                 createRoom: document.getElementById('create-room-btn'),
                 mobileMenu: document.getElementById('mobile-menu-btn'),
                 closeSidebar: document.getElementById('close-sidebar-btn')
@@ -42,11 +37,6 @@ class ChatApp {
                 statusText: document.querySelector('.status-text')
             }
         };
-
-        // Validate critical DOM presence immediately
-        if (!this.dom.views.login || !this.dom.views.chat) {
-            console.error("FATAL: Critical DOM elements missing.");
-        }
 
         this._configureMarkdown();
         this.init();
@@ -104,9 +94,7 @@ class ChatApp {
     }
 
     init() {
-        if (this.dom.buttons.login) this.dom.buttons.login.addEventListener('click', () => this.handleLogin());
         if (this.dom.buttons.send) this.dom.buttons.send.addEventListener('click', () => this.handleSendMessage());
-        if (this.dom.buttons.logout) this.dom.buttons.logout.addEventListener('click', () => this.handleLogout());
         if (this.dom.buttons.createRoom) this.dom.buttons.createRoom.addEventListener('click', () => this.handleCreateRoom());
         
         if (this.dom.buttons.mobileMenu) this.dom.buttons.mobileMenu.addEventListener('click', () => this.toggleSidebar(!this.state.isSidebarOpen));
@@ -151,39 +139,22 @@ class ChatApp {
     async checkHealth() {
         try {
             const health = await this.api.getHealth();
-            if (health.initialized && health.node_id) {
-                this.state.user = { username: health.node_id }; 
-                this.transitionToChat();
+            if (health.initialized) {
+                this.state.user = { username: health.node_id };
+                return this.transitionToChat();
             }
         } catch (e) { console.error('Health check failed', e); }
-    }
-
-    async handleLogin() {
-        if (!this.dom.inputs.username) return;
-        const username = this.dom.inputs.username.value.trim();
-        if (!username) return alert('Username required');
-
-        try {
-            const user = await this.api.login(username, 'dummy');
-            this.state.user = user;
-            this.transitionToChat();
-        } catch (e) {
-            alert(`Login failed: ${e.message}`);
-        }
-    }
-
-    handleLogout() {
-        this.state.user = null;
-        this.disconnectWebSocket();
-        if (this.dom.views.login) this.dom.views.login.classList.remove('hidden');
-        if (this.dom.views.chat) this.dom.views.chat.classList.add('hidden');
-        if (this.dom.inputs.username) this.dom.inputs.username.value = '';
+        setTimeout(() => this.checkHealth(), 1000); // node still starting
     }
 
     async transitionToChat() {
-        if (this.dom.views.login) this.dom.views.login.classList.add('hidden');
         if (this.dom.views.chat) this.dom.views.chat.classList.remove('hidden');
         if (this.dom.containers.userInfo) this.dom.containers.userInfo.textContent = this.state.user.username;
+        // Logout stops this node; the session token proves to the orchestrator that it's us.
+        document.getElementById('logout-form').action = `${ORCHESTRATOR_URL}/logout`;
+        document.getElementById('logout-username').value = this.state.user.username;
+        document.getElementById('logout-token').value =
+            (document.cookie.match(/(?:^|; )flc_session=([^;]*)/) || [])[1] || '';
         
         try {
             const rooms = await this.api.getRooms();
@@ -198,7 +169,9 @@ class ChatApp {
 
     handleCreateRoom() {
         if (!this.dom.inputs.newRoom) return;
-        const roomName = this.dom.inputs.newRoom.value.trim().toLowerCase().replace(/\s+/g, '-');
+        // Same rule as the server: 1-32 of [a-z0-9-]
+        const roomName = this.dom.inputs.newRoom.value.trim().toLowerCase()
+            .replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32);
         if (!roomName) return;
         if (!this.state.knownRooms.has(roomName)) {
             this.state.knownRooms.add(roomName);
@@ -211,7 +184,6 @@ class ChatApp {
     async switchRoom(roomId) {
         if (this.state.currentRoom === roomId && this.state.socket) return;
         this.state.currentRoom = roomId;
-        this.state.unreadCounts[roomId] = 0;
         
         if (this.dom.containers.roomName) this.dom.containers.roomName.textContent = `#${roomId}`;
         this.renderRoomList();
@@ -221,13 +193,6 @@ class ChatApp {
         }
 
         this.disconnectWebSocket();
-        try {
-            console.log(`Syncing room ${roomId}...`);
-            await this.api.syncRoom(roomId);
-        } catch (e) {
-            console.warn("Sync failed (likely network or peer issue), falling back to local history", e);
-        }
-
         await this.loadHistory();
         this.connectWebSocket();
     }
@@ -272,7 +237,7 @@ class ChatApp {
 
     connectWebSocket() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/api/ws/${this.state.currentRoom}`;
+        const wsUrl = `${protocol}//${window.location.host}/api/ws/${encodeURIComponent(this.state.currentRoom)}`;
         this.state.socket = new WebSocket(wsUrl);
         this.state.socket.onopen = () => this.updateStatus(true);
         this.state.socket.onclose = () => this.updateStatus(false);
@@ -393,7 +358,7 @@ class ChatApp {
             const isActive = roomId === this.state.currentRoom;
             const btn = document.createElement('button');
             btn.className = `w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition flex justify-between items-center ${isActive ? 'bg-primary/10 text-primary' : 'text-gray-600 hover:bg-gray-100'}`;
-            btn.innerHTML = `<span># ${roomId}</span>`;
+            btn.textContent = `# ${roomId}`; // room names come from peers: never parse them as HTML
             btn.onclick = () => this.switchRoom(roomId);
             list.appendChild(btn);
         });

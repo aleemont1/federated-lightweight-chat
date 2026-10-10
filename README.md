@@ -11,122 +11,134 @@
 
 </div>
 
-**Federated Lightweight Chat** is a simple distributed chat system designed to demonstrate eventual consistency and causal ordering in a decentralized environment. Built with **FastAPI** and **Python 3.11**, it leverages modern asynchronous programming patterns to handle node-to-node communication without a central authority.
+Federated Lightweight Chat (FLC) is a distributed, container-native messaging system designed to demonstrate Eventual Consistency, Vector Clocks, and Dynamic Orchestration.
+
+Unlike traditional chat applications, FLC assigns a dedicated, isolated Docker container to each user. These nodes communicate peer-to-peer using a Gossip Protocol, while a central Orchestrator handles lifecycle management and an Edge Router (Traefik) handles dynamic domain routing.
 
 ## 🚀 Key Features
 
-  * **Decentralized Architecture:** No central server; nodes communicate directly via HTTP.
-  * **Eventual Consistency:** Implements a randomized **Gossip Protocol** to propagate messages across the cluster in the background, ensuring all nodes eventually synchronize.
-  * **Causal Ordering:** Utilizes **Vector Clocks** to track message causality and partial ordering, ensuring chat history consistency even with network latency or partitions.
-  * **Local Persistence:** Uses **SQLite** for lightweight, reliable message and peer persistence, managing database connections and schema initialization locally.
-  * **Modern Python Stack:** Fully typed codebase using **Pydantic V2** for data validation and settings management.
+Dynamic User Provisioning: The Orchestrator service listens on the Docker Socket to automatically spawn new containers when users log in.
+
+Dynamic Edge Routing: Traefik acts as a reverse proxy, automatically discovering new user containers and routing traffic to subdomains (e.g., alice.localhost, bob.localhost) without restarts.
+
+Decentralized Messaging: Messages are stored locally in each node's SQLite database. There is no central message database.
+
+Eventual Consistency: Implements a randomized Gossip Protocol and Anti-Entropy mechanisms to synchronize messages between nodes.
+
+Causal Ordering: Utilizes Vector Clocks to track message causality, ensuring consistent history ordering even across network partitions.
+
+Self-Healing: Nodes automatically recover missing messages from peers upon restart using the discovery service.
 
 ## 🛠️ Tech Stack
 
 <div align="center">
 
 <table>
-  <tr>
-    <td><strong>Framework</strong></td>
-    <td><img src="https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi"></td>
-  </tr>
-  <tr>
-    <td><strong>Validation</strong></td>
-    <td><img src="https://img.shields.io/badge/pydantic-%23E92063.svg?style=for-the-badge&logo=pydantic&logoColor=white"></td>
-  </tr>
-  <tr>
-    <td><strong>Storage</strong></td>
-    <td><img src="https://img.shields.io/badge/sqlite-%2307405e.svg?style=for-the-badge&logo=sqlite&logoColor=white"></td>
-  </tr>
-  <tr>
-    <td><strong>Package Manager</strong></td>
-    <td><img src="https://img.shields.io/badge/Poetry-%233B82F6.svg?style=for-the-badge&logo=poetry&logoColor=0B3D8D"></td>
-  </tr>
+<tr>
+<td><strong>Framework</strong></td>
+<td><img src="https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi"></td>
+</tr>
+<tr>
+<td><strong>Orchestration</strong></td>
+<td><img src="https://img.shields.io/badge/docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white"></td>
+</tr>
+<tr>
+<td><strong>Routing</strong></td>
+<td><img src="https://img.shields.io/badge/Traefik-%252324a1c1.svg?style=for-the-badge&logo=traefik&logoColor=white"></td>
+</tr>
+<tr>
+<td><strong>Discovery</strong></td>
+<td><img src="https://img.shields.io/badge/Redis-%23DD0031.svg?style=for-the-badge&logo=redis&logoColor=white"></td>
+</tr>
+<tr>
+<td><strong>Storage</strong></td>
+<td><img src="https://img.shields.io/badge/sqlite-%2307405e.svg?style=for-the-badge&logo=sqlite&logoColor=white"></td>
+</tr>
+<tr>
+<td><strong>Validation</strong></td>
+<td><img src="https://img.shields.io/badge/pydantic-%23E92063.svg?style=for-the-badge&logo=pydantic&logoColor=white"></td>
+</tr>
 </table>
 
 </div>
 
+## 📦 Architecture Overview
+
+The system consists of three main infrastructure layers:
+
+Traefik (Edge Router): The entry point. It routes localhost to the Orchestrator and *.localhost to specific user containers.
+
+Orchestrator: A control plane that manages the Docker lifecycle. It spawns user nodes and provides a "Loading" UI while containers initialize.
+
+Redis: Acts as a discovery directory for nodes to find each other's internal IPs within the bridge network.
 
 ## 📂 Project Structure
 
-```text
+```
 federated-lightweight-chat/
-├── .github/workflows/   # CI/CD Pipelines (GitHub Actions)
-├── scripts/             # Utility scripts (e.g., check.sh)
 ├── src/
-│   ├── config/          # Environment configuration (Pydantic Settings)
-│   ├── core/            # Domain logic (Vector Clocks, Node State, Messages)
-│   └── services/        # Business logic (Storage, Gossip Protocol)
-├── tests/               # Unit and Integration tests (Pytest)
-├── pyproject.toml       # Dependencies and Tool Config
-└── poetry.lock          # Locked dependencies
+│   ├── api/                    # FastAPI Routes for User Nodes
+│   ├── config/                 # Pydantic Settings
+│   ├── core/                   # Domain logic (Vector Clocks, Messages)
+│   ├── services/               # Logic (Orchestrator, Gossip, Storage)
+│   ├── static/                 # Frontend assets (JS, CSS)
+│   ├── main.py                 # Entry point for User Nodes
+│   └── orchestrator_api.py     # Entry point for the Orchestrator
+├── scripts/                    # Utility scripts (Deployment & Testing)
+├── tests/                      # Unit and Integration tests
+├── docker-compose.yml          # Infrastructure definition
+└── Dockerfile                  # One image: user nodes and the orchestrator
 ```
 
 ## ⚡ Getting Started
 
-### Prerequisites
+Prerequisites
 
-  * Python 3.11 or higher
-  * [Poetry](https://www.google.com/search?q=https://python-poetry.org/docs/%23installation) installed
+Docker and Docker Compose installed.
 
-### Installation
+Ports 80 (Gateway), 8080 (Traefik Dashboard), and 6379 (Redis) must be available.
 
-1.  **Clone the repository:**
+### 🚀 Automated Local Deployment (for Development)
 
-    ```bash
-    git clone https://github.com/aleemont1/federated-lightweight-chat.git
-    cd federated-lightweight-chat
-    ```
+To streamline the startup process, use the provided helper script scripts/local_deploy.sh. It handles image building and container orchestration in one step:
+```bash
+./scripts/local_deploy.sh
+```
 
-2.  **Install dependencies:**
+### Manual Deployment
 
-    ```bash
-    poetry install --with dev
-    ```
+1. Build the images:
+```bash
+docker-compose build
+```
 
-    This command installs both runtime dependencies (FastAPI, Uvicorn) and development tools (Black, MyPy, Pytest).
+2. Start the infrastructure:
+```bash
+docker-compose up -d
+```
 
-### Configuration
+3. Access the application:
 
-Configuration is handled via environment variables, loaded by Pydantic Settings. You can create a `.env` file to override defaults like `SERVER_PORT` or `PEERS`.
+Open http://localhost to access the Orchestrator.
+
+Login with a username (e.g., alice). The system will spawn a container and redirect you to http://<username>.localhost.
 
 ## 🧪 Development & Quality Assurance
 
-This project adheres to strict code quality standards, enforced by a CI pipeline.
+This project adheres to strict code quality standards. We provide utility scripts to run tests and linters easily.
 
 ### Local Quality Check
 
-A convenience script `scripts/check.sh` is provided to run the full suite of checks locally. This script performs the following:
-
-1.  **Formatting:** Runs `black` and `isort` to ensure code style consistency.
-2.  **Static Analysis:** Runs `mypy` for type checking, `flake8` for linting, and `bandit` for security analysis.
-3.  **Testing:** Runs `pytest` with verbose output to verify unit tests.
-
-<!-- end list -->
+To run the full quality assurance suite (formatting, static analysis, and unit tests), use the check.sh script:
 
 ```bash
-# Make the script executable
-chmod +x scripts/check.sh
-
-# Run the full QA suite
 ./scripts/check.sh
 ```
 
-### Testing
+This script performs:
 
-Unit tests focus on ensuring the correctness of core distributed system components like **Vector Clocks** and **Node State** logic, as well as persistence layers.
+- **Formatting**: black and isort.
+- **Static Analysis**: mypy (types) and flake8 (lint).
+- **Testing**: Runs pytest with coverage reports.
 
-```bash
-# Run tests with coverage report
-poetry run pytest -vv --cov=src
-```
 
-<!---
-## 🐳 Docker Support
-
-The project includes a **Continuous Delivery (CD)** pipeline that automatically builds and pushes Docker images upon pushing to the main branch.
-
-```bash
-docker pull aleemont/flc-node:latest
-```
--->
