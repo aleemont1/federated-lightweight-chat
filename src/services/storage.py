@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 # Per room, per writer: the ranges of sequence numbers held, e.g. [(1, 4), (6, 699)] with seq 5
 # missing. Ranges, not just the gap-free prefix, so a peer never resends what sits above a gap.
 # A message's sequence number is its writer's own entry in its vector clock.
+# Older nodes send integer watermarks: Dict[str, Dict[str, int]].
 Summary = Dict[str, Dict[str, List[Tuple[int, int]]]]
 
 
@@ -52,6 +53,7 @@ class StorageService:
         # Connect to the DB. This will fail if the directory doesn't exist/isn't writable.
         conn = sqlite3.connect(self.db_name)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA synchronous = NORMAL")
         try:
             yield conn
         finally:
@@ -60,6 +62,7 @@ class StorageService:
     def _init_db(self) -> None:
         """Creates the schema, or migrates a database from before writer ids."""
         with self._get_conn() as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS messages (
@@ -113,31 +116,47 @@ class StorageService:
             row = conn.execute("SELECT value FROM meta WHERE key = 'writer_id'").fetchone()
         return str(row["value"])
 
+    def add_messages(self, messages: List[Message]) -> List[Message]:
+        """
+        Inserts a batch of messages in a single transaction.
+        Returns the list of messages that were newly stored (filtering out duplicates).
+        """
+        if not messages:
+            return []
+        stored = []
+        with self._get_conn() as conn:
+            with conn:
+                for message in messages:
+                    cursor = conn.execute(
+                        """
+                        INSERT OR IGNORE INTO messages
+                            (
+                                message_id, room_id, sender_id, content,
+                                vector_clock, created_at, writer_id, seq
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            message.message_id,
+                            message.room_id,
+                            message.sender_id,
+                            message.content,
+                            json.dumps(message.vector_clock),
+                            message.created_at,
+                            message.writer_id,
+                            message.vector_clock.get(message.writer_id, 0),
+                        ),
+                    )
+                    if cursor.rowcount == 1:
+                        stored.append(message)
+        return stored
+
     def add_message(self, message: Message) -> bool:
         """
         Inserts a message in the local storage.
         Returns False if it was already stored (replication is idempotent).
         """
-        with self._get_conn() as conn:
-            cursor = conn.execute(
-                """
-                INSERT OR IGNORE INTO messages
-                    (message_id, room_id, sender_id, content, vector_clock, created_at, writer_id, seq)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    message.message_id,
-                    message.room_id,
-                    message.sender_id,
-                    message.content,
-                    json.dumps(message.vector_clock),
-                    message.created_at,
-                    message.writer_id,
-                    message.vector_clock.get(message.writer_id, 0),
-                ),
-            )
-            conn.commit()
-            return cursor.rowcount == 1
+        return len(self.add_messages([message])) == 1
 
     def get_room_messages(self, room_id: str, limit: int = 50, offset: int = 0) -> List[Message]:
         """
@@ -180,6 +199,7 @@ class StorageService:
     def summary(self) -> Summary:
         """What this replica holds: per room and writer, the ranges of sequence numbers."""
         summary: Summary = {}
+
         with self._get_conn() as conn:
             # Gaps and islands: within a run of consecutive seqs, seq minus its rank is constant.
             # DISTINCT absorbs seqs reused before writer ids existed.
@@ -204,11 +224,13 @@ class StorageService:
         fill every batch with duplicates and starve the rest.
         """
         spans = [
-            (room_id, writer_id, lo, hi)
+            (room_id, writer_id, r[0], r[1])
             for room_id, writers in have.items()
             for writer_id, ranges in writers.items()
-            for lo, hi in ranges
+            for r in ranges
+            if len(r) == 2
         ]
+
         with self._get_conn() as conn:
             # Indexed, so each message checks only the nearest range below its seq: O(log n), not O(ranges).
             conn.execute(

@@ -15,7 +15,7 @@ import asyncio
 import logging
 import secrets
 import socket
-from typing import Awaitable, Callable, List
+from typing import Awaitable, Callable, List, Optional
 
 import httpx
 import redis.asyncio as redis
@@ -57,10 +57,12 @@ class GossipService:
         node_id: str,
         node_addr: str,
         on_message: Callable[[Message], Awaitable[bool]],
+        on_batch: Optional[Callable[[List[Message]], Awaitable[int]]] = None,
     ):
         self.storage = storage
         self.node_addr = node_addr
         self.on_message = on_message
+        self.on_batch = on_batch
         self._key = f"discovery:node:{node_id}"
         self.redis = redis.from_url(  # type: ignore[no-untyped-call]
             settings.redis_url,
@@ -85,12 +87,18 @@ class GossipService:
         response = await self.http.post(f"{peer.rstrip('/')}/api/internal/sync", json=self.storage.summary())
         response.raise_for_status()
         messages = [Message.model_validate(m) for m in response.json()]
+        if not messages:
+            return 0
+        if self.on_batch:
+            return await self.on_batch(messages)
         return sum([await self.on_message(msg) for msg in messages])
 
     async def sync_once(self, drain: bool = False) -> int:
         """
-        One anti-entropy round: heartbeat, then pull from a random peer; with `drain`, keep
-        pulling from it until it has nothing new for us. Returns the new messages. Never raises.
+        One anti-entropy round: heartbeat, then pull from active peers.
+        When drain=False, pulls from a single random peer.
+        When drain=True, attempts to drain missing history across all candidate peers
+        until fully caught up. Returns the number of new messages pulled. Never raises.
         """
         try:
             await self.redis.set(self._key, self.node_addr, ex=HEARTBEAT_TTL)
@@ -100,18 +108,27 @@ class GossipService:
         if not self._peers:
             return 0
 
-        peer, total = secrets.choice(self._peers), 0
-        try:
-            # Counting only *new* messages guarantees termination: a peer that keeps
-            # resending duplicates (it can't fill our gap either) stops the loop.
-            while new := await self.pull_from(peer):
-                total += new
+        if not drain:
+            peers = [secrets.choice(self._peers)]
+        else:
+            peers = list(self._peers)
+            secrets.SystemRandom().shuffle(peers)
+
+        total = 0
+        for peer in peers:
+            try:
+                # Counting only *new* messages guarantees termination: a peer that keeps
+                # resending duplicates (it can't fill our gap either) stops the loop.
+                while new := await self.pull_from(peer):
+                    total += new
+                    if not drain:
+                        break
                 if not drain:
                     break
-        except Exception as e:
-            logger.warning("Anti-entropy with %s failed: %s", peer, e)
+            except Exception as e:
+                logger.warning("Anti-entropy with %s failed: %s", peer, e)
         if total:
-            logger.info("Anti-entropy: pulled %d messages from %s", total, peer)
+            logger.info("Anti-entropy: pulled %d messages across candidate peers", total)
         return total
 
     async def run(self) -> None:

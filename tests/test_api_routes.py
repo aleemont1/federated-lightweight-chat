@@ -250,7 +250,7 @@ def test_health_and_internal_sync_need_no_session(mock_node_service):
     client.cookies.clear()
     mock_node_service.storage.missing_messages.return_value = []
     assert client.get("/api/health").status_code == 200
-    assert client.post("/api/internal/sync", json={}).status_code == 200
+    assert client.post("/api/internal/sync", json={"general": {"alice": [[1, 5]]}}).status_code == 200
 
 
 def test_websocket_requires_session(mock_websocket_manager):

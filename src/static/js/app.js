@@ -152,15 +152,29 @@ class ChatApp {
         if (this.dom.views.chat) this.dom.views.chat.classList.remove('hidden');
         if (this.dom.containers.userInfo) this.dom.containers.userInfo.textContent = this.state.user.username;
         
-        try {
-            const rooms = await this.api.getRooms();
-            rooms.forEach(r => this.state.knownRooms.add(r));
-        } catch (e) { console.warn("Failed to fetch rooms", e); }
-        
-        this.renderRoomList();
+        await this.refreshRooms();
         this.toggleSidebar(this.state.isSidebarOpen);
         
         this.switchRoom('general');
+
+        // Periodically refresh known rooms so background anti-entropy discoveries show up
+        setInterval(() => this.refreshRooms(), 5000);
+    }
+
+    async refreshRooms() {
+        try {
+            const rooms = await this.api.getRooms();
+            let changed = false;
+            rooms.forEach(r => {
+                if (!this.state.knownRooms.has(r)) {
+                    this.state.knownRooms.add(r);
+                    changed = true;
+                }
+            });
+            if (changed) {
+                this.renderRoomList();
+            }
+        } catch (e) { console.warn("Failed to fetch rooms", e); }
     }
 
     handleCreateRoom() {
@@ -182,6 +196,9 @@ class ChatApp {
         this.state.currentRoom = roomId;
         
         if (this.dom.containers.roomName) this.dom.containers.roomName.textContent = `#${roomId}`;
+        if (this.dom.containers.messages) {
+            this.dom.containers.messages.innerHTML = '<div class="text-center text-gray-400 mt-4 text-sm">Loading...</div>';
+        }
         this.renderRoomList();
         
         if (window.innerWidth < 768) {

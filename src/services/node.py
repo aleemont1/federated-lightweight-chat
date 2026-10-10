@@ -48,22 +48,32 @@ class NodeService:
             node_id=user_id,
             node_addr=settings.advertised_addr,
             on_message=self.ingest,
+            on_batch=self.ingest_batch,
         )
         # Catch up before serving, so the user sees the full history at once. Not needed for
         # correctness: a node whose DB was lost is a new writer and can't reuse sequence numbers.
         await self._gossip.sync_once(drain=True)
         self._tasks = [asyncio.create_task(self._gossip.run()), asyncio.create_task(self._gossip.listen())]
 
+    async def ingest_batch(self, messages: List[Message]) -> int:
+        """
+        Applies a batch of messages received from a peer in a single transaction.
+        Returns how many were new.
+        """
+        if not self.state or not self.storage or not messages:
+            return 0
+        new_msgs = self.storage.add_messages(messages)
+        for msg in new_msgs:
+            self.state.update_clock(msg.room_id, msg.vector_clock)
+            await manager.broadcast(msg)
+        return len(new_msgs)
+
     async def ingest(self, message: Message) -> bool:
         """
         Applies a message received from a peer. Idempotent, so both replication paths can
         deliver it. Returns True if the message was new.
         """
-        if not self.state or not self.storage or not self.storage.add_message(message):
-            return False
-        self.state.update_clock(message.room_id, message.vector_clock)
-        await manager.broadcast(message)
-        return True
+        return (await self.ingest_batch([message])) == 1
 
     async def send(self, room_id: str, content: str) -> Message:
         """Creates a message authored by this node, stores it and replicates it."""

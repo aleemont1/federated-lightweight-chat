@@ -41,6 +41,21 @@ def test_add_and_retrieve_message(storage_service):
     assert loaded == message
 
 
+def test_add_messages_batch(storage_service):
+    """Batch insertion stores new messages in a single transaction and skips duplicates."""
+    m1 = msg(1, room="batch_room")
+    m2 = msg(2, room="batch_room")
+    assert storage_service.add_messages([]) == []
+    stored = storage_service.add_messages([m1, m2])
+    assert len(stored) == 2
+    # Second insertion with overlapping message skips the duplicate
+    m3 = msg(3, room="batch_room")
+    stored2 = storage_service.add_messages([m2, m3])
+    assert len(stored2) == 1
+    assert stored2[0].message_id == m3.message_id
+    assert len(storage_service.get_room_messages("batch_room")) == 3
+
+
 def test_creates_missing_db_directory(tmp_path):
     """The DB directory (e.g. a fresh /data volume) is created on demand."""
     StorageService(str(tmp_path / "nested" / "dir" / "node.db"))

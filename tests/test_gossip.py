@@ -164,6 +164,29 @@ async def test_drain_stops_when_peer_only_has_duplicates(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_drain_tries_other_peers_when_one_fails(tmp_path):
+    """If one peer errors during startup catch-up, drain tries remaining peers rather than failing."""
+    a_storage, a_state, _ = make_node(tmp_path, "alice")
+    b_storage, _, b_ingest = make_node(tmp_path, "bob")
+    write(a_storage, a_state, "general", "from alice")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "failing" in str(request.url):
+            return httpx.Response(422, json={"detail": "unprocessable"})
+        missing = a_storage.missing_messages(json.loads(request.content))
+        return httpx.Response(200, json=[m.model_dump(mode="json") for m in missing])
+
+    service = GossipService(b_storage, "bob", "http://bob", on_message=b_ingest)
+    service.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service.redis = AsyncMock()
+    service.get_active_peers = AsyncMock(return_value=["http://failing", "http://alice"])
+
+    pulled = await service.sync_once(drain=True)
+    assert pulled == 1
+    assert b_storage.get_room_messages("general")[0].content == "from alice"
+
+
+@pytest.mark.asyncio
 async def test_anti_entropy_survives_redis_outage(tmp_path):
     """With discovery down, the last known peers are still used: Redis is not needed to repair."""
     a_storage, a_state, _ = make_node(tmp_path, "alice")
