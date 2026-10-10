@@ -61,6 +61,9 @@ jobs:
       - name: Run Pytest with Coverage
         run: poetry run pytest -vv --cov=src --cov-report=term-missing --cov-fail-under=80
 
+      - name: Install Chromium for the browser tests
+        run: poetry run playwright install --with-deps chromium
+
       # Real containers, Redis and network cuts: the guarantees unit tests can't prove.
       - name: End-to-end suite
         run: ./scripts/e2e.sh

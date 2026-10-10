@@ -4,6 +4,7 @@ real containers, real Redis, real network cuts. Each test is one invariant.
 
 Run: docker compose up -d --build && FLC_E2E=1 pytest tests/test_e2e.py -v
 (or ./scripts/e2e.sh). Skipped otherwise, so the unit gates stay fast.
+The chat tests at the bottom drive headless Chromium: `playwright install chromium` once.
 
 Requests go to 127.0.0.1 with an explicit Host header, so `*.localhost`
 doesn't need to resolve on the machine running the tests.
@@ -20,6 +21,7 @@ import docker
 import httpx
 import pytest
 from docker.errors import NotFound
+from playwright.sync_api import Page, Route, expect
 
 pytestmark = pytest.mark.skipif(not os.getenv("FLC_E2E"), reason="needs the stack: set FLC_E2E=1")
 
@@ -211,3 +213,56 @@ def test_nodes_refuse_everything_without_the_right_session(cluster: List[Node]) 
     with orchestrator() as orch:
         assert orch.post("/stop", data={"username": a.user, "password": "wrong-password"}).status_code == 401
         assert orch.post("/login", data={"username": a.user, "password": "wrong-password"}).status_code == 401
+
+
+# --- The chat in a real browser ---
+
+
+def open_chat(page: Page, node: Node) -> None:
+    """Follows the node's login link, like the loading page does, and waits for a live socket."""
+    page.goto(f"http://{node.user}.localhost/api/auth?token={node.token}")
+    expect(page.locator("#user-info")).to_have_text(node.user)
+    page.wait_for_function("window.app.state.socket?.readyState === WebSocket.OPEN")
+
+
+def test_fast_room_switches_show_each_message_once(cluster: List[Node], page: Page) -> None:
+    """Regression: overlapping switches left orphaned sockets open, and every message showed up twice."""
+    a, b, _ = cluster
+    sockets: List[Any] = []
+    page.on("websocket", lambda ws: sockets.append(ws))  # Playwright rejects builtin methods as handlers
+    open_chat(page, a)
+    r = room()
+
+    page.evaluate("r => { for (const x of [r, 'general', r, 'general', r]) app.switchRoom(x) }", r)
+    page.wait_for_function("window.app.state.socket?.readyState === WebSocket.OPEN")
+    b.send(r, f"once {r}")
+
+    expect(page.locator("#message-list").get_by_text(f"once {r}", exact=True)).to_have_count(1)
+    page.wait_for_timeout(1000)  # a duplicate from a leftover socket would land by now
+    expect(page.locator("#message-list").get_by_text(f"once {r}", exact=True)).to_have_count(1)
+    assert len([ws for ws in sockets if not ws.is_closed()]) == 1
+
+
+def test_message_sent_while_history_loads_is_shown(cluster: List[Node], page: Page) -> None:
+    """Regression: a message stored after the history snapshot but before the socket opened was lost."""
+    a, b, _ = cluster
+    open_chat(page, a)
+    r = room()
+    content = f"sent during the load of {r}"
+    held = []
+
+    def hold_history(route: Route) -> None:
+        if held or f"room_id={r}" not in route.request.url:
+            return route.continue_()
+        held.append(route)
+        response = route.fetch()  # the history snapshot, taken before bob writes
+        b.send(r, content)  # stored after it: only the live push can deliver it now
+        time.sleep(1)  # the push reaches the browser while the history is still pending
+        route.fulfill(response=response)
+
+    page.route("**/api/messages?*", hold_history)
+    page.fill("#new-room-input", r)
+    page.press("#new-room-input", "Enter")
+
+    expect(page.locator("#message-list").get_by_text(content, exact=True)).to_have_count(1)
+    assert held, "the history request was intercepted"
