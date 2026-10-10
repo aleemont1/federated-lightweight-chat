@@ -39,7 +39,7 @@ browser ─────────────► Traefik (flc-gateway) ──�
 - **Nodes**: each one writes locally and never waits for the others. Two replication paths:
   - *fast path*: a new message is published on Redis pub/sub and stored by every online node;
   - *anti-entropy*: every 2 s a node sends a random peer its summary (per room and writer, the
-    highest sequence number with no gaps below it) and pulls whatever it lacks. This path alone
+    ranges of sequence numbers it holds) and pulls exactly what it lacks. This path alone
     guarantees convergence, after crashes, restarts, partitions or a Redis outage.
 - **Ordering**: each message carries a vector clock. Rooms are sorted by the sum of the clock,
   then timestamp, sender and id. That order respects causality (if A happened before B, A's sum

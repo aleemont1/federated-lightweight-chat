@@ -4,7 +4,7 @@ Replication between nodes. Every node holds a full replica of the chat log.
 Two paths, so that correctness never depends on Redis:
 - fast path: each new message is published on Redis pub/sub and stored by every listening node;
 - repair path (anti-entropy): every GOSSIP_INTERVAL seconds a node sends its summary
-  (per room and writer, the highest gap-free sequence number) to a random peer and pulls
+  (per room and writer, the ranges of sequence numbers held) to a random peer and pulls
   what it lacks. This recovers whatever the fast path lost: node offline, Redis down, partitions.
 
 Redis is also the discovery registry: each node refreshes a key with a TTL as its heartbeat.

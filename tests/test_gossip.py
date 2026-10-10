@@ -73,7 +73,7 @@ async def test_pull_converges_beyond_old_100_message_cap(tmp_path):
         rounds += 1
 
     assert len(b_storage.get_room_messages("bulk", limit=500, offset=0)) == 500
-    assert b_storage.summary() == {"bulk": {a_state.writer_id: 1200}}
+    assert b_storage.summary() == {"bulk": {a_state.writer_id: [(1, 1200)]}}
     assert rounds == 3  # 500 + 500 + 200
 
 
@@ -85,7 +85,7 @@ async def test_pull_fills_gaps_and_merges_clock(tmp_path):
     msgs = [write(a_storage, a_state, "general", c) for c in ("one", "two", "three")]
     await b_ingest(msgs[0])
     await b_ingest(msgs[2])
-    assert b_storage.summary() == {"general": {a_state.writer_id: 1}}
+    assert b_storage.summary() == {"general": {a_state.writer_id: [(1, 1), (3, 3)]}}
 
     await gossip_towards(b_storage, b_ingest, a_storage).pull_from("http://alice")
 
@@ -144,7 +144,7 @@ async def test_drain_catches_up_in_one_call(tmp_path):
     gossip.get_active_peers = AsyncMock(return_value=["http://alice"])  # type: ignore[method-assign]
 
     assert await gossip.sync_once(drain=True) == 1200
-    assert b_storage.summary() == {"bulk": {a_state.writer_id: 1200}}
+    assert b_storage.summary() == {"bulk": {a_state.writer_id: [(1, 1200)]}}
 
 
 @pytest.mark.asyncio
@@ -217,3 +217,24 @@ async def test_node_that_lost_its_data_is_still_heard(tmp_path):
         "one",
         "two",
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_gap_nobody_can_fill_does_not_starve_new_messages(tmp_path):
+    """
+    Regression: nobody holds wendy's seq 5 (lost on the fast path, then wendy went offline).
+    Summaries only reported the gap-free prefix, so every round the peer resent wendy's 6..605,
+    which filled the 500-message batch and carol's new message never got through.
+    """
+    w_storage, w_state, _ = make_node(tmp_path, "wendy")
+    r_storage, _, r_ingest = make_node(tmp_path, "rita")
+    p_storage, p_state, p_ingest = make_node(tmp_path, "paul")
+    for i in range(1, 606):
+        msg = write(w_storage, w_state, "general", f"w{i}")
+        if i != 5:
+            await r_ingest(msg)
+            await p_ingest(msg)
+    news = write(p_storage, p_state, "general", "from paul, after the gap")  # causally after wendy's
+
+    assert await gossip_towards(r_storage, r_ingest, p_storage).pull_from("http://paul") == 1
+    assert r_storage.get_room_messages("general", limit=1)[0].message_id == news.message_id

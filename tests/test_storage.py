@@ -95,13 +95,20 @@ def test_room_clocks_merge_all_messages(storage_service):
     assert storage_service.room_clocks() == {"general": {"alice": 4, "bob": 2}, "other": {"alice": 7}}
 
 
-def test_summary_stops_at_first_gap(storage_service):
-    """Only the gap-free prefix counts, so the missing message is asked for again."""
-    for seq in (1, 2, 4):
+def test_summary_lists_held_ranges_around_gaps(storage_service):
+    """The gap shows as a hole between ranges: the missing message is asked for, the rest isn't."""
+    for seq in (1, 2, 4, 5, 7):
         storage_service.add_message(msg(seq))
     storage_service.add_message(msg(1, sender="bob"))
 
-    assert storage_service.summary() == {"general": {"alice": 2, "bob": 1}}
+    assert storage_service.summary() == {"general": {"alice": [(1, 2), (4, 5), (7, 7)], "bob": [(1, 1)]}}
+    assert [
+        m.content for m in storage_service.missing_messages({"general": {"alice": [(1, 1), (5, 7)]}})
+    ] == [
+        "bob1",
+        "alice2",
+        "alice4",
+    ]
 
 
 def test_missing_messages(storage_service):
@@ -110,11 +117,13 @@ def test_missing_messages(storage_service):
         storage_service.add_message(msg(seq))
     storage_service.add_message(msg(1, sender="bob", room="other"))
 
-    missing = storage_service.missing_messages({"general": {"alice": 1}})
+    missing = storage_service.missing_messages({"general": {"alice": [(1, 1)]}})
     assert [m.content for m in missing] == ["bob1", "alice2", "alice3"]
 
     assert [m.content for m in storage_service.missing_messages({}, limit=2)] == ["alice1", "bob1"]
-    assert storage_service.missing_messages({"general": {"alice": 3}, "other": {"bob": 1}}) == []
+    assert (
+        storage_service.missing_messages({"general": {"alice": [(1, 3)]}, "other": {"bob": [(1, 1)]}}) == []
+    )
 
 
 def test_legacy_database_is_migrated(tmp_path):
@@ -133,7 +142,7 @@ def test_legacy_database_is_migrated(tmp_path):
 
     storage = StorageService(path)
 
-    assert storage.summary() == {"general": {"alice": 2}}
+    assert storage.summary() == {"general": {"alice": [(1, 2)]}}
     assert [m.writer_id for m in storage.get_room_messages("general")] == ["alice", "alice"]
 
 
@@ -158,6 +167,6 @@ def test_summary_and_missing_are_per_writer(storage_service):
             )
         )
 
-    assert storage_service.summary() == {"general": {"alice/old": 2, "alice/new": 1}}
-    missing = storage_service.missing_messages({"general": {"alice/old": 2}})
+    assert storage_service.summary() == {"general": {"alice/new": [(1, 1)], "alice/old": [(1, 2)]}}
+    missing = storage_service.missing_messages({"general": {"alice/old": [(1, 2)]}})
     assert [m.content for m in missing] == ["alice/new1"]

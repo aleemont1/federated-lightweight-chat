@@ -154,16 +154,17 @@ def test_internal_sync_returns_missing_messages(mock_node_service):
     missing = Message(room_id="general", sender_id="test_user", content="you missed this")
     mock_node_service.storage.missing_messages.return_value = [missing]
 
-    response = client.post("/api/internal/sync", json={"general": {"test_user": 2}})
+    response = client.post("/api/internal/sync", json={"general": {"test_user": [[1, 2]]}})
 
     assert response.status_code == 200
     assert response.json()[0]["content"] == "you missed this"
-    mock_node_service.storage.missing_messages.assert_called_once_with({"general": {"test_user": 2}})
+    mock_node_service.storage.missing_messages.assert_called_once_with({"general": {"test_user": [(1, 2)]}})
 
 
-def test_internal_sync_rejects_malformed_summary(mock_node_service):
-    """Sequence numbers must be integers."""
-    response = client.post("/api/internal/sync", json={"general": {"bob": "lots"}})
+@pytest.mark.parametrize("ranges", ["lots", [[1]], [["a", "b"]], 7])
+def test_internal_sync_rejects_malformed_summary(mock_node_service, ranges):
+    """Each writer maps to a list of [low, high] integer pairs."""
+    response = client.post("/api/internal/sync", json={"general": {"bob": ranges}})
     assert response.status_code == 422
 
 

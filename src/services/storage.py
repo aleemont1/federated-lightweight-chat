@@ -9,7 +9,7 @@ import os
 import secrets
 import sqlite3
 from contextlib import contextmanager
-from typing import Dict, Iterator, List
+from typing import Dict, Iterator, List, Tuple
 
 from src.core.message import Message, VectorClock
 from src.core.vector_clock import merge
@@ -17,9 +17,10 @@ from src.core.vector_clock import merge
 # Configure module logger
 logger = logging.getLogger(__name__)
 
-# Per room, per writer: the highest sequence number held with no gaps below it.
+# Per room, per writer: the ranges of sequence numbers held, e.g. [(1, 4), (6, 699)] with seq 5
+# missing. Ranges, not just the gap-free prefix, so a peer never resends what sits above a gap.
 # A message's sequence number is its writer's own entry in its vector clock.
-Summary = Dict[str, Dict[str, int]]
+Summary = Dict[str, Dict[str, List[Tuple[int, int]]]]
 
 
 def _to_message(row: sqlite3.Row) -> Message:
@@ -177,41 +178,55 @@ class StorageService:
     # ponytail: both run on the (room, writer, seq) index but still visit every message each
     # round. Fine for tens of thousands of messages; past that, keep a per-(room, writer) watermark.
     def summary(self) -> Summary:
-        """What this replica holds: per room and writer, the highest gap-free sequence number."""
+        """What this replica holds: per room and writer, the ranges of sequence numbers."""
         summary: Summary = {}
         with self._get_conn() as conn:
-            # Within the gap-free prefix the k-th smallest seq is k; the first gap breaks it.
+            # Gaps and islands: within a run of consecutive seqs, seq minus its rank is constant.
+            # DISTINCT absorbs seqs reused before writer ids existed.
             for row in conn.execute(
                 """
-                SELECT room_id, writer_id, MAX(seq) AS top FROM (
+                SELECT room_id, writer_id, MIN(seq) AS lo, MAX(seq) AS hi FROM (
                     SELECT room_id, writer_id, seq,
-                        ROW_NUMBER() OVER (PARTITION BY room_id, writer_id ORDER BY seq) AS k
-                    FROM messages
-                ) WHERE seq = k GROUP BY room_id, writer_id
+                        seq - ROW_NUMBER() OVER (PARTITION BY room_id, writer_id ORDER BY seq) AS island
+                    FROM (SELECT DISTINCT room_id, writer_id, seq FROM messages WHERE seq IS NOT NULL)
+                ) GROUP BY room_id, writer_id, island ORDER BY room_id, writer_id, lo
                 """
             ):
-                summary.setdefault(row["room_id"], {})[row["writer_id"]] = row["top"]
+                summary.setdefault(row["room_id"], {}).setdefault(row["writer_id"], []).append(
+                    (row["lo"], row["hi"])
+                )
         return summary
 
     def missing_messages(self, have: Summary, limit: int = 500) -> List[Message]:
         """
-        Messages that a replica with summary `have` lacks, in causal order.
-        Causal order puts each writer's lowest missing sequence first, so every
-        batch closes the requester's gaps even when capped by `limit`.
+        Messages that a replica with summary `have` lacks, in causal order. Only what it
+        lacks: messages above one of its gaps are not resent, so an unfillable gap can't
+        fill every batch with duplicates and starve the rest.
         """
+        spans = [
+            (room_id, writer_id, lo, hi)
+            for room_id, writers in have.items()
+            for writer_id, ranges in writers.items()
+            for lo, hi in ranges
+        ]
         with self._get_conn() as conn:
+            # Indexed, so each message checks only the nearest range below its seq: O(log n), not O(ranges).
+            conn.execute(
+                """CREATE TEMP TABLE have (room_id TEXT, writer_id TEXT, lo INTEGER, hi INTEGER,
+                    PRIMARY KEY (room_id, writer_id, lo))"""
+            )
+            conn.executemany("INSERT OR IGNORE INTO have VALUES (?, ?, ?, ?)", spans)
             rows = conn.execute(
                 """
-                WITH have (room_id, writer_id, seq) AS (
-                    SELECT room.key, writer.key, writer.value
-                    FROM json_each(?) AS room, json_each(room.value) AS writer
-                )
                 SELECT m.* FROM causal_messages AS m
-                LEFT JOIN have AS h ON h.room_id = m.room_id AND h.writer_id = m.writer_id
-                WHERE m.seq > COALESCE(h.seq, 0)
+                WHERE m.seq > COALESCE((
+                    SELECT h.hi FROM have AS h
+                    WHERE h.room_id = m.room_id AND h.writer_id = m.writer_id AND h.lo <= m.seq
+                    ORDER BY h.lo DESC LIMIT 1
+                ), 0)
                 ORDER BY m.clock_sum, m.created_at, m.sender_id, m.message_id
                 LIMIT ?
                 """,
-                (json.dumps(have), limit),
+                (limit,),
             ).fetchall()
         return [_to_message(row) for row in rows]
