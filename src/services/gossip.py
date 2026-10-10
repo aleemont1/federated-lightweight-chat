@@ -14,6 +14,7 @@ The last peer list is kept, so anti-entropy keeps working while Redis is down.
 import asyncio
 import logging
 import secrets
+import socket
 from typing import Awaitable, Callable, List
 
 import httpx
@@ -29,6 +30,17 @@ logger = logging.getLogger(__name__)
 GOSSIP_INTERVAL = 2.0
 HEARTBEAT_TTL = 10
 CHANNEL = "chat"
+PUBLISH_TIMEOUT = 1.0
+
+# A partition black-holes open connections: no reply, no error. The kernel drops a dead one after
+# ~10s instead: keepalive probes catch it when idle (the pub/sub listener), the user timeout when a
+# command awaits its reply. Not socket_timeout: it would also fire on a merely idle listener.
+KEEPALIVE = {
+    socket.TCP_KEEPIDLE: 5,
+    socket.TCP_KEEPINTVL: 2,
+    socket.TCP_KEEPCNT: 3,
+    socket.TCP_USER_TIMEOUT: 10_000,  # ms
+}
 
 
 class GossipService:
@@ -46,7 +58,11 @@ class GossipService:
         self.on_message = on_message
         self._key = f"discovery:node:{node_id}"
         self.redis = redis.from_url(  # type: ignore[no-untyped-call]
-            settings.redis_url, decode_responses=True
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_keepalive=True,
+            socket_keepalive_options=KEEPALIVE,
         )
         self.http = httpx.AsyncClient(timeout=3.0)
         self._peers: List[str] = []  # last known, used when Redis is unreachable
@@ -100,10 +116,13 @@ class GossipService:
             await self.sync_once()
 
     async def publish(self, message: Message) -> None:
-        """Fast path. Best effort: if Redis is down, anti-entropy delivers the message later."""
+        """
+        Fast path. Best effort: if Redis is down, anti-entropy delivers the message later.
+        Bounded, because the user's write waits on it and must not hang during a partition.
+        """
         try:
-            await self.redis.publish(CHANNEL, message.model_dump_json())
-        except redis.RedisError as e:
+            await asyncio.wait_for(self.redis.publish(CHANNEL, message.model_dump_json()), PUBLISH_TIMEOUT)
+        except (redis.RedisError, TimeoutError) as e:
             logger.warning("Publish of %s failed, leaving it to anti-entropy: %s", message.message_id, e)
 
     async def listen(self) -> None:

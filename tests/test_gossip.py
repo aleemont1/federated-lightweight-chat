@@ -4,6 +4,7 @@ The peer is reached through an httpx MockTransport that serves its storage,
 so the whole pull protocol runs except the network.
 """
 
+import asyncio
 import json
 from unittest.mock import AsyncMock
 
@@ -171,3 +172,18 @@ async def test_anti_entropy_survives_redis_outage(tmp_path):
 
     assert await gossip.sync_once() == 1
     assert b_storage.get_room_messages("general")[0].content == "sent while Redis was down"
+
+
+@pytest.mark.asyncio
+async def test_publish_gives_up_on_a_hanging_redis(tmp_path):
+    """Regression: during a partition publish hung forever, and with it the user's write."""
+    storage, state, ingest = make_node(tmp_path, "carol")
+    service = GossipService(storage, "carol", "http://carol", on_message=ingest)
+    service.redis = AsyncMock()
+
+    async def hang(*_):
+        await asyncio.Event().wait()
+
+    service.redis.publish.side_effect = hang
+
+    await asyncio.wait_for(service.publish(write(storage, state, "general", "x")), timeout=3)
