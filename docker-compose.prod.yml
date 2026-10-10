@@ -1,0 +1,35 @@
+# Public deployment: HTTPS with Let's Encrypt certificates on top of docker-compose.yml.
+#
+#   PUBLIC_DOMAIN=203.0.113.7.nip.io ACME_EMAIL=you@example.org \
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Ports 80 and 443 must be reachable from the internet: Let's Encrypt checks each name on port 80
+# (HTTP-01). Every user's node gets its own certificate the first time it starts.
+services:
+  traefik:
+    command:  # replaces the base command: no dashboard in production
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.le.acme.email=${ACME_EMAIL:?set ACME_EMAIL, Let's Encrypt requires it}"
+      - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"
+      # Rehearse with https://acme-staging-v02.api.letsencrypt.org/directory: no rate limits, untrusted certs.
+      - "--certificatesresolvers.le.acme.caserver=${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}"
+    ports:
+      - "443:443"
+    volumes:
+      - letsencrypt:/letsencrypt  # issued certificates survive restarts (and rate limits)
+
+  orchestrator:
+    environment:
+      - TLS=true
+    labels:
+      - "traefik.http.routers.orchestrator.entrypoints=websecure"
+      - "traefik.http.routers.orchestrator.tls.certresolver=le"
+
+volumes:
+  letsencrypt:

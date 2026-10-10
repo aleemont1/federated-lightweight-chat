@@ -1,8 +1,7 @@
 """Unit tests for storage service and CRUD ops on DB."""
 
-# Disabling pylint warning as it is a false positive due to pytest fixtures.
-# pylint: disable=redefined-outer-name
-import time
+import json
+import sqlite3
 
 import pytest
 
@@ -16,188 +15,173 @@ def storage_service(tmp_path):
     Creates a temporary file-based DB.
     tmp_path is a built-in pytest fixture that provides a temporary directory
     """
-    db_file = tmp_path / "test_node.db"
-    return StorageService(str(db_file))
+    return StorageService(str(tmp_path / "test_node.db"))
 
 
-def test_add_and_retreive_message(storage_service):
-    """
-    Tests message addition and retrieval
-    """
-    msg = Message(
+def msg(seq, sender="alice", room="general", **clock):
+    """A message whose sender entry in the clock is `seq`."""
+    return Message(
+        room_id=room, sender_id=sender, content=f"{sender}{seq}", vector_clock={sender: seq, **clock}
+    )
+
+
+def test_add_and_retrieve_message(storage_service):
+    """Tests message addition, idempotency and retrieval."""
+    message = Message(
         room_id="test_room",
         sender_id="test_sender",
         content="Unit testing",
         vector_clock={"node_a": 1, "node_b": 2},
     )
 
-    storage_service.add_message(msg)
+    assert storage_service.add_message(message) is True
+    assert storage_service.add_message(message) is False  # duplicates are ignored
 
-    assert storage_service.message_exists(msg.message_id)
-    retrieved_msg = storage_service.get_all_messages()
-
-    assert len(retrieved_msg) == 1
-    loaded_msg = retrieved_msg[0]
-
-    assert loaded_msg.message_id == msg.message_id
-    assert loaded_msg.room_id == "test_room"
-    assert loaded_msg.sender_id == "test_sender"
-    assert loaded_msg.content == "Unit testing"
-
-    assert isinstance(loaded_msg.vector_clock, dict)
-    assert loaded_msg.vector_clock["node_a"] == 1
+    (loaded,) = storage_service.get_room_messages("test_room")
+    assert loaded == message
 
 
-def test_save_and_load_snapshot(storage_service):
-    """Test saving and loading vector clock snapshots."""
-    room_id = "general"
-    vector_clock = {"alice": 10, "bob": 5}
-
-    # 1. Save Snapshot
-    storage_service.save_snapshot(room_id, vector_clock)
-
-    # 2. Load Snapshot
-    loaded_clock, timestamp = storage_service.load_snapshot(room_id)
-
-    assert loaded_clock == vector_clock
-    assert timestamp > 0.0
-
-    # 3. Overwrite Snapshot (should replace old one)
-    new_clock = {"alice": 12, "bob": 6}
-    storage_service.save_snapshot(room_id, new_clock)
-
-    loaded_clock_2, timestamp_2 = storage_service.load_snapshot(room_id)
-    assert loaded_clock_2 == new_clock
-    assert timestamp_2 >= timestamp
+def test_add_messages_batch(storage_service):
+    """Batch insertion stores new messages in a single transaction and skips duplicates."""
+    m1 = msg(1, room="batch_room")
+    m2 = msg(2, room="batch_room")
+    assert storage_service.add_messages([]) == []
+    stored = storage_service.add_messages([m1, m2])
+    assert len(stored) == 2
+    # Second insertion with overlapping message skips the duplicate
+    m3 = msg(3, room="batch_room")
+    stored2 = storage_service.add_messages([m2, m3])
+    assert len(stored2) == 1
+    assert stored2[0].message_id == m3.message_id
+    assert len(storage_service.get_room_messages("batch_room")) == 3
 
 
-def test_load_snapshot_not_found(storage_service):
-    """Test loading a snapshot that doesn't exist."""
-    clock, timestamp = storage_service.load_snapshot("unknown_room")
-    assert clock is None
-    assert timestamp == 0.0
+def test_creates_missing_db_directory(tmp_path):
+    """The DB directory (e.g. a fresh /data volume) is created on demand."""
+    StorageService(str(tmp_path / "nested" / "dir" / "node.db"))
+    assert (tmp_path / "nested" / "dir" / "node.db").exists()
 
 
-def test_get_messages_after(storage_service):
-    """Test retrieving messages after a certain timestamp (Delta Recovery)."""
-    room_id = "chat1"
-    base_time = time.time()
+def test_room_messages_are_newest_page_in_causal_order(storage_service):
+    """offset counts back from the newest message; each page is returned oldest first."""
+    for seq in range(1, 6):
+        storage_service.add_message(msg(seq))
+    storage_service.add_message(msg(1, room="other"))
 
-    # Create messages with different timestamps
-    msg1 = Message(room_id=room_id, sender_id="a", content="old", created_at=base_time - 100)
-    msg2 = Message(room_id=room_id, sender_id="a", content="snapshot_point", created_at=base_time)
-    msg3 = Message(room_id=room_id, sender_id="a", content="new1", created_at=base_time + 10)
-    msg4 = Message(room_id=room_id, sender_id="a", content="new2", created_at=base_time + 20)
-
-    # Add all to DB
-    for m in [msg1, msg2, msg3, msg4]:
-        storage_service.add_message(m)
-
-    # Query: Get messages strictly AFTER base_time (simulating recovery from snapshot at msg2)
-    # Note: float comparison can be tricky, usually we use the snapshot timestamp
-    delta_messages = storage_service.get_messages_after(room_id, base_time)
-
-    assert len(delta_messages) == 2
-    assert delta_messages[0].content == "new1"
-    assert delta_messages[1].content == "new2"
+    assert [m.content for m in storage_service.get_room_messages("general", limit=2)] == ["alice4", "alice5"]
+    assert [m.content for m in storage_service.get_room_messages("general", limit=2, offset=2)] == [
+        "alice2",
+        "alice3",
+    ]
+    assert len(storage_service.get_room_messages("general", limit=10)) == 5
+    assert storage_service.get_room_messages("empty_room") == []
 
 
-def test_get_all_room_ids_mixed_sources(storage_service):
-    """
-    Test retrieving room IDs from both messages table and snapshots table.
-    Ensures union logic works correctly.
-    """
-    # Room A only has messages
-    msg_a = Message(room_id="room_A", sender_id="a", content="hi")
-    storage_service.add_message(msg_a)
+def test_causal_order_ignores_wall_clock(storage_service):
+    """A reply that saw the original sorts after it even if its timestamp is older."""
+    original = msg(1)
+    original.created_at = 1000.0
+    reply = Message(
+        room_id="general",
+        sender_id="bob",
+        content="reply",
+        vector_clock={"alice": 1, "bob": 1},
+        created_at=1.0,
+    )
+    storage_service.add_message(reply)
+    storage_service.add_message(original)
 
-    # Room B only has a snapshot (e.g., all messages compacted/deleted in a hypothetical future feature)
-    storage_service.save_snapshot("room_B", {"node": 1})
-
-    # Room C has both
-    msg_c = Message(room_id="room_C", sender_id="a", content="hi")
-    storage_service.add_message(msg_c)
-    storage_service.save_snapshot("room_C", {"node": 5})
-
-    rooms = storage_service.get_all_room_ids()
-
-    assert len(rooms) == 3
-    assert "room_A" in rooms
-    assert "room_B" in rooms
-    assert "room_C" in rooms
+    assert [m.content for m in storage_service.get_room_messages("general")] == ["alice1", "reply"]
 
 
-def test_get_latest_clock(storage_service):
-    """
-    Test latest vector clock retreival
-    """
-    msg1 = Message(room_id="r", sender_id="s", content="1", vector_clock={"node_a": 10})
-    msg2 = Message(
-        room_id="r",
-        sender_id="s",
-        content="2",
-        vector_clock={"node_a": 25, "node_b": 10},
+def test_known_rooms(storage_service):
+    """Rooms are listed once each, sorted."""
+    for room in ("b", "a", "b"):
+        storage_service.add_message(Message(room_id=room, sender_id="x", content="hi"))
+    assert storage_service.get_known_rooms() == ["a", "b"]
+
+
+def test_room_clocks_merge_all_messages(storage_service):
+    """Clocks are rebuilt from history, so restarts need no snapshot."""
+    storage_service.add_message(msg(3, bob=1))
+    storage_service.add_message(msg(2, sender="bob", alice=4))
+    storage_service.add_message(msg(7, room="other"))
+
+    assert storage_service.room_clocks() == {"general": {"alice": 4, "bob": 2}, "other": {"alice": 7}}
+
+
+def test_summary_lists_held_ranges_around_gaps(storage_service):
+    """The gap shows as a hole between ranges: the missing message is asked for, the rest isn't."""
+    for seq in (1, 2, 4, 5, 7):
+        storage_service.add_message(msg(seq))
+    storage_service.add_message(msg(1, sender="bob"))
+
+    assert storage_service.summary() == {"general": {"alice": [(1, 2), (4, 5), (7, 7)], "bob": [(1, 1)]}}
+    assert [
+        m.content for m in storage_service.missing_messages({"general": {"alice": [(1, 1), (5, 7)]}})
+    ] == [
+        "bob1",
+        "alice2",
+        "alice4",
+    ]
+
+
+def test_missing_messages(storage_service):
+    """Returns exactly what the requester lacks, in causal order, capped by limit."""
+    for seq in range(1, 4):
+        storage_service.add_message(msg(seq))
+    storage_service.add_message(msg(1, sender="bob", room="other"))
+
+    missing = storage_service.missing_messages({"general": {"alice": [(1, 1)]}})
+    assert [m.content for m in missing] == ["bob1", "alice2", "alice3"]
+
+    assert [m.content for m in storage_service.missing_messages({}, limit=2)] == ["alice1", "bob1"]
+    assert (
+        storage_service.missing_messages({"general": {"alice": [(1, 3)]}, "other": {"bob": [(1, 1)]}}) == []
     )
 
-    storage_service.add_message(msg1)
-    storage_service.add_message(msg2)
 
-    assert storage_service.get_latest_clock("node_a") == 25
-    assert storage_service.get_latest_clock("node_b") == 10
-    assert storage_service.get_latest_clock("node_c") == 0
-
-
-def test_peers_management(storage_service):
-    """Test adding and retrieving peers."""
-    room = "lobby"
-    peer = "http://10.0.0.1:8000"
-
-    storage_service.add_peer(room, peer)
-    peers = storage_service.get_peers(room)
-
-    assert len(peers) == 1
-    assert peers[0] == peer
-
-
-def test_get_all_room_messages(storage_service):
-    """
-    Test retrieval of messages for a specific room with pagination.
-    """
-    room_target = "target_room"
-    room_other = "other_room"
-
-    # Add messages to target room (ordered by time)
-    for i in range(5):
-        msg = Message(
-            room_id=room_target,
-            sender_id="tester",
-            content=f"msg_{i}",
-            created_at=time.time() + i,  # Ensure ordering
+def test_legacy_database_is_migrated(tmp_path):
+    """Volumes written before writer ids: the sender was the writer and its clock entry the seq."""
+    path = str(tmp_path / "old.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE messages (message_id TEXT PRIMARY KEY, room_id TEXT, sender_id TEXT,"
+            " content TEXT, vector_clock TEXT, created_at REAL)"
         )
-        storage_service.add_message(msg)
+        for seq in (1, 2):
+            conn.execute(
+                "INSERT INTO messages VALUES (?, 'general', 'alice', 'hi', ?, 1.0)",
+                (f"m{seq}", json.dumps({"alice": seq, "bob": 1})),
+            )
 
-    # Add message to another room (should be ignored)
-    msg_other = Message(room_id=room_other, sender_id="tester", content="noise")
-    storage_service.add_message(msg_other)
+    storage = StorageService(path)
 
-    # 1. Fetch all messages for target room
-    messages = storage_service.get_all_room_messages(room_target, limit=10)
-    assert len(messages) == 5
-    assert all(m.room_id == room_target for m in messages)
-    assert messages[0].content == "msg_0"
+    assert storage.summary() == {"general": {"alice": [(1, 2)]}}
+    assert [m.writer_id for m in storage.get_room_messages("general")] == ["alice", "alice"]
 
-    # 2. Test Pagination (Limit)
-    messages_limit = storage_service.get_all_room_messages(room_target, limit=2)
-    assert len(messages_limit) == 2
-    assert messages_limit[0].content == "msg_0"
-    assert messages_limit[1].content == "msg_1"
 
-    # 3. Test Pagination (Offset)
-    messages_offset = storage_service.get_all_room_messages(room_target, limit=2, offset=2)
-    assert len(messages_offset) == 2
-    assert messages_offset[0].content == "msg_2"
-    assert messages_offset[1].content == "msg_3"
+def test_writer_id_belongs_to_the_database(tmp_path):
+    """Same DB, same writer across restarts; a lost DB comes back as a new writer."""
+    first = StorageService(str(tmp_path / "a.db")).writer_id("alice")
+    assert StorageService(str(tmp_path / "a.db")).writer_id("alice") == first
+    reborn = StorageService(str(tmp_path / "b.db")).writer_id("alice")
+    assert reborn != first and reborn.startswith("alice/")
 
-    # 4. Test Empty Room
-    empty = storage_service.get_all_room_messages("empty_room")
-    assert len(empty) == 0
+
+def test_summary_and_missing_are_per_writer(storage_service):
+    """Two incarnations of alice number independently: neither hides the other."""
+    for seq, writer in ((1, "alice/old"), (2, "alice/old"), (1, "alice/new")):
+        storage_service.add_message(
+            Message(
+                room_id="general",
+                sender_id="alice",
+                writer_id=writer,
+                content=f"{writer}{seq}",
+                vector_clock={writer: seq},
+            )
+        )
+
+    assert storage_service.summary() == {"general": {"alice/new": [(1, 1)], "alice/old": [(1, 2)]}}
+    missing = storage_service.missing_messages({"general": {"alice/old": [(1, 2)]}})
+    assert [m.content for m in missing] == ["alice/new1"]

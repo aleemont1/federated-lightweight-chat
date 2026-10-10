@@ -18,8 +18,8 @@ build/
 dist/
 *.egg-info/
 
-# --- Generated Assets (Opzionale) ---
-# src/static/css/styles.css
+# --- Generated Assets (built by `npm run build` / the Docker image) ---
+src/static/css/styles.css
 
 # --- Testing & Coverage ---
 .coverage

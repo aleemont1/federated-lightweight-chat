@@ -1,40 +1,31 @@
-x-node-defaults: &node-defaults
-  build: .
-  image: flc-node:latest
-  networks:
-    - flc-net
-  healthcheck:
-    test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
-    interval: 10s
-    timeout: 5s
-    retries: 5
-  volumes:
-    - ./docker_data/shared:/data
-  depends_on:
-    init-perms:
-      condition: service_completed_successfully
-    redis:
-      condition: service_healthy
-
 services:
-  init-perms:
-    image: busybox
-    command: sh -c "mkdir -p /shared /redis && chmod 777 /shared /redis"
+  # 1. Edge Router / Reverse Proxy
+  traefik:
+    # UPDATED: v3.6+ is REQUIRED to fix "client version 1.24 is too old" on Docker 29+
+    image: traefik:v3.6
+    container_name: flc-gateway
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"                # The main entry point
+      - "127.0.0.1:8080:8080"  # Traefik dashboard: unauthenticated, so this machine only
     volumes:
-      - ./docker_data/shared:/shared
-      - ./docker_data/redis:/redis
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - flc-net
 
-  # Cache / PubSub Layer
+  # 2. Redis (Data & Discovery)
   redis:
     image: redis:7.4-bookworm
     container_name: flc-redis
     command: redis-server --appendonly yes --bind 0.0.0.0
-    ports:
-      - "6379:6379"
+    expose:
+      - "6379"
     volumes:
-      - ./docker_data/redis:/data
+      - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -43,154 +34,40 @@ services:
     networks:
       - flc-net
 
-  # Application Nodes
-  node-0:
-    <<: *node-defaults
-    container_name: flc-node-0
-    ports:
-      - "8000:8000"
+  # 3. Orchestrator (Control Plane). Same image as the nodes, different entry point;
+  # building it here also produces the flc-node:latest image the orchestrator spawns.
+  orchestrator:
+    build: .
+    image: flc-node:latest
+    command: ["uvicorn", "src.orchestrator_api:app", "--host", "0.0.0.0", "--port", "8000"]
+    container_name: flc-orchestrator
+    # The Docker socket is root-owned. Access to it is root on the host anyway.
+    user: root
+    init: true
+    healthcheck:
+      disable: true # the image's probe targets the node API
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - orchestrator-data:/data # accounts (salted password hashes)
     environment:
-      - APP_NAME=FLC-Node-0
-      - SERVER_PORT=8000
-      - NODE_ID=user_0
-      - PEERS=http://flc-node-1:8000
-      - ADVERTISED_ADDR=http://flc-node-0:8000
-      - DB_NAME=/data/user_0.db
-      - REDIS_URL=redis://flc-redis:6379
+      # Python SDK might still need this if it's old, but Traefik v3.6 handles itself
+      - DOCKER_API_VERSION=1.44
+      - MAX_USERS=${MAX_USERS:-10}
+      - PUBLIC_DOMAIN=${PUBLIC_DOMAIN:-localhost}
+      - ACCOUNTS_DB=/data/accounts.db
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.orchestrator.rule=Host(`${PUBLIC_DOMAIN:-localhost}`)"
+      - "traefik.http.routers.orchestrator.entrypoints=web"
+      - "traefik.http.services.orchestrator.loadbalancer.server.port=8000"
+    networks:
+      - flc-net
 
-  node-1:
-    <<: *node-defaults
-    container_name: flc-node-1
-    ports:
-      - "8001:8000"
-    environment:
-      - APP_NAME=FLC-Node-1
-      - SERVER_PORT=8000
-      - NODE_ID=user_1
-      - PEERS=http://flc-node-0:8000,http://flc-node-2:8000
-      - ADVERTISED_ADDR=http://flc-node-1:8000
-      - DB_NAME=/data/user_1.db
-      - REDIS_URL=redis://flc-redis:6379
-    depends_on:
-      init-perms:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-      node-0:
-        condition: service_healthy
-
-  node-2:
-    <<: *node-defaults
-    container_name: flc-node-2
-    ports:
-      - "8002:8000"
-    environment:
-      - APP_NAME=FLC-Node-2
-      - SERVER_PORT=8000
-      - NODE_ID=user_2
-      - PEERS=http://flc-node-1:8000,http://flc-node-3:8000
-      - ADVERTISED_ADDR=http://flc-node-2:8000
-      - DB_NAME=/data/user_2.db
-      - REDIS_URL=redis://flc-redis:6379
-
-  node-3:
-    <<: *node-defaults
-    container_name: flc-node-3
-    ports:
-      - "8003:8000"
-    environment:
-      - APP_NAME=FLC-Node-3
-      - SERVER_PORT=8000
-      - NODE_ID=user_3
-      - PEERS=http://flc-node-2:8000,http://flc-node-4:8000
-      - ADVERTISED_ADDR=http://flc-node-3:8000
-      - DB_NAME=/data/user_3.db
-      - REDIS_URL=redis://flc-redis:6379
-
-  node-4:
-    <<: *node-defaults
-    container_name: flc-node-4
-    ports:
-      - "8004:8000"
-    environment:
-      - APP_NAME=FLC-Node-4
-      - SERVER_PORT=8000
-      - NODE_ID=user_4
-      - PEERS=http://flc-node-3:8000,http://flc-node-5:8000
-      - ADVERTISED_ADDR=http://flc-node-4:8000
-      - DB_NAME=/data/user_4.db
-      - REDIS_URL=redis://flc-redis:6379
-
-  node-5:
-    <<: *node-defaults
-    container_name: flc-node-5
-    ports:
-      - "8005:8000"
-    environment:
-      - APP_NAME=FLC-Node-5
-      - SERVER_PORT=8000
-      - NODE_ID=user_5
-      - PEERS=http://flc-node-4:8000,http://flc-node-6:8000
-      - ADVERTISED_ADDR=http://flc-node-5:8000
-      - DB_NAME=/data/user_5.db
-      - REDIS_URL=redis://flc-redis:6379
-
-  node-6:
-    <<: *node-defaults
-    container_name: flc-node-6
-    ports:
-      - "8006:8000"
-    environment:
-      - APP_NAME=FLC-Node-6
-      - SERVER_PORT=8000
-      - NODE_ID=user_6
-      - PEERS=http://flc-node-5:8000,http://flc-node-7:8000
-      - ADVERTISED_ADDR=http://flc-node-6:8000
-      - DB_NAME=/data/user_6.db
-      - REDIS_URL=redis://flc-redis:6379
-
-  node-7:
-    <<: *node-defaults
-    container_name: flc-node-7
-    ports:
-      - "8007:8000"
-    environment:
-      - APP_NAME=FLC-Node-7
-      - SERVER_PORT=8000
-      - NODE_ID=user_7
-      - PEERS=http://flc-node-6:8000,http://flc-node-8:8000
-      - ADVERTISED_ADDR=http://flc-node-7:8000
-      - DB_NAME=/data/user_7.db
-      - REDIS_URL=redis://flc-redis:6379
-
-  node-8:
-    <<: *node-defaults
-    container_name: flc-node-8
-    ports:
-      - "8008:8000"
-    environment:
-      - APP_NAME=FLC-Node-8
-      - SERVER_PORT=8000
-      - NODE_ID=user_8
-      - PEERS=http://flc-node-7:8000,http://flc-node-9:8000
-      - ADVERTISED_ADDR=http://flc-node-8:8000
-      - DB_NAME=/data/user_8.db
-      - REDIS_URL=redis://flc-redis:6379
-
-  node-9:
-    <<: *node-defaults
-    container_name: flc-node-9
-    ports:
-      - "8009:8000"
-    environment:
-      - APP_NAME=FLC-Node-9
-      - SERVER_PORT=8000
-      - NODE_ID=user_9
-      - PEERS=http://flc-node-8:8000,http://flc-node-0:8000
-      - ADVERTISED_ADDR=http://flc-node-9:8000
-      - DB_NAME=/data/user_9.db
-      - REDIS_URL=redis://flc-redis:6379
+volumes:
+  redis-data:
+  orchestrator-data:
 
 networks:
   flc-net:
+    name: flc-net
     driver: bridge

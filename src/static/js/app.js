@@ -8,27 +8,23 @@ class ChatApp {
             user: null,
             currentRoom: 'general',
             socket: null,
+            shown: new Set(), // message ids on screen: history and live pushes can overlap
             knownRooms: new Set(['general']),
-            unreadCounts: {},
             isSidebarOpen: window.innerWidth >= 768, 
         };
 
         this.dom = {
             views: {
-                login: document.getElementById('login-view'),
                 chat: document.getElementById('chat-view'),
                 sidebar: document.getElementById('chat-sidebar'),
                 overlay: document.getElementById('mobile-overlay')
             },
             inputs: {
-                username: document.getElementById('username-input'),
                 message: document.getElementById('message-input'),
                 newRoom: document.getElementById('new-room-input')
             },
             buttons: {
-                login: document.getElementById('login-btn'),
                 send: document.getElementById('send-btn'),
-                logout: document.getElementById('logout-btn'),
                 createRoom: document.getElementById('create-room-btn'),
                 mobileMenu: document.getElementById('mobile-menu-btn'),
                 closeSidebar: document.getElementById('close-sidebar-btn')
@@ -42,11 +38,6 @@ class ChatApp {
                 statusText: document.querySelector('.status-text')
             }
         };
-
-        // Validate critical DOM presence immediately
-        if (!this.dom.views.login || !this.dom.views.chat) {
-            console.error("FATAL: Critical DOM elements missing.");
-        }
 
         this._configureMarkdown();
         this.init();
@@ -104,9 +95,7 @@ class ChatApp {
     }
 
     init() {
-        if (this.dom.buttons.login) this.dom.buttons.login.addEventListener('click', () => this.handleLogin());
         if (this.dom.buttons.send) this.dom.buttons.send.addEventListener('click', () => this.handleSendMessage());
-        if (this.dom.buttons.logout) this.dom.buttons.logout.addEventListener('click', () => this.handleLogout());
         if (this.dom.buttons.createRoom) this.dom.buttons.createRoom.addEventListener('click', () => this.handleCreateRoom());
         
         if (this.dom.buttons.mobileMenu) this.dom.buttons.mobileMenu.addEventListener('click', () => this.toggleSidebar(!this.state.isSidebarOpen));
@@ -151,54 +140,48 @@ class ChatApp {
     async checkHealth() {
         try {
             const health = await this.api.getHealth();
-            if (health.initialized && health.node_id) {
-                this.state.user = { username: health.node_id }; 
-                this.transitionToChat();
+            if (health.initialized) {
+                this.state.user = { username: health.node_id };
+                return this.transitionToChat();
             }
         } catch (e) { console.error('Health check failed', e); }
-    }
-
-    async handleLogin() {
-        if (!this.dom.inputs.username) return;
-        const username = this.dom.inputs.username.value.trim();
-        if (!username) return alert('Username required');
-
-        try {
-            const user = await this.api.login(username, 'dummy');
-            this.state.user = user;
-            this.transitionToChat();
-        } catch (e) {
-            alert(`Login failed: ${e.message}`);
-        }
-    }
-
-    handleLogout() {
-        this.state.user = null;
-        this.disconnectWebSocket();
-        if (this.dom.views.login) this.dom.views.login.classList.remove('hidden');
-        if (this.dom.views.chat) this.dom.views.chat.classList.add('hidden');
-        if (this.dom.inputs.username) this.dom.inputs.username.value = '';
+        setTimeout(() => this.checkHealth(), 1000); // node still starting
     }
 
     async transitionToChat() {
-        if (this.dom.views.login) this.dom.views.login.classList.add('hidden');
         if (this.dom.views.chat) this.dom.views.chat.classList.remove('hidden');
         if (this.dom.containers.userInfo) this.dom.containers.userInfo.textContent = this.state.user.username;
         
-        try {
-            const rooms = await this.api.getRooms();
-            rooms.forEach(r => this.state.knownRooms.add(r));
-        } catch (e) { console.warn("Failed to fetch rooms", e); }
-        
-        this.renderRoomList();
+        await this.refreshRooms();
         this.toggleSidebar(this.state.isSidebarOpen);
         
         this.switchRoom('general');
+
+        // Periodically refresh known rooms so background anti-entropy discoveries show up
+        setInterval(() => this.refreshRooms(), 5000);
+    }
+
+    async refreshRooms() {
+        try {
+            const rooms = await this.api.getRooms();
+            let changed = false;
+            rooms.forEach(r => {
+                if (!this.state.knownRooms.has(r)) {
+                    this.state.knownRooms.add(r);
+                    changed = true;
+                }
+            });
+            if (changed) {
+                this.renderRoomList();
+            }
+        } catch (e) { console.warn("Failed to fetch rooms", e); }
     }
 
     handleCreateRoom() {
         if (!this.dom.inputs.newRoom) return;
-        const roomName = this.dom.inputs.newRoom.value.trim().toLowerCase().replace(/\s+/g, '-');
+        // Same rule as the server: 1-32 of [a-z0-9-]
+        const roomName = this.dom.inputs.newRoom.value.trim().toLowerCase()
+            .replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32);
         if (!roomName) return;
         if (!this.state.knownRooms.has(roomName)) {
             this.state.knownRooms.add(roomName);
@@ -208,27 +191,21 @@ class ChatApp {
         this.dom.inputs.newRoom.value = '';
     }
 
-    async switchRoom(roomId) {
+    switchRoom(roomId) {
         if (this.state.currentRoom === roomId && this.state.socket) return;
         this.state.currentRoom = roomId;
-        this.state.unreadCounts[roomId] = 0;
         
         if (this.dom.containers.roomName) this.dom.containers.roomName.textContent = `#${roomId}`;
+        if (this.dom.containers.messages) {
+            this.dom.containers.messages.innerHTML = '<div class="text-center text-gray-400 mt-4 text-sm">Loading...</div>';
+        }
         this.renderRoomList();
         
         if (window.innerWidth < 768) {
             this.toggleSidebar(false);
         }
 
-        this.disconnectWebSocket();
-        try {
-            console.log(`Syncing room ${roomId}...`);
-            await this.api.syncRoom(roomId);
-        } catch (e) {
-            console.warn("Sync failed (likely network or peer issue), falling back to local history", e);
-        }
-
-        await this.loadHistory();
+        // Synchronous from the guard to the new socket, so a second click can't slip in between.
         this.connectWebSocket();
     }
 
@@ -243,13 +220,15 @@ class ChatApp {
         } catch (e) { console.error('Send failed', e); }
     }
 
-    async loadHistory() {
+    async loadHistory(isCurrent) {
         const container = this.dom.containers.messages;
         if (!container) return;
         container.innerHTML = '<div class="text-center text-gray-400 mt-4 text-sm">Loading...</div>';
         try {
             const messages = await this.api.getMessages(this.state.currentRoom);
+            if (!isCurrent()) return; // the user moved on while this was loading
             container.innerHTML = '';
+            this.state.shown.clear();
             if (messages.length === 0) container.innerHTML = '<div class="text-center text-gray-400 mt-4 text-sm">No messages yet.</div>';
             else {
                 // FIXED: Wrapped in individual try-catch to prevent one bad message from hiding all history
@@ -265,24 +244,46 @@ class ChatApp {
                 this.scrollToBottom();
             }
         } catch (e) { 
+            if (!isCurrent()) return;
             console.error("History load error:", e);
             container.innerHTML = '<div class="text-center text-red-400 mt-4">Failed to load history</div>'; 
         }
     }
 
     connectWebSocket() {
+        this.disconnectWebSocket();
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/api/ws/${this.state.currentRoom}`;
-        this.state.socket = new WebSocket(wsUrl);
-        this.state.socket.onopen = () => this.updateStatus(true);
-        this.state.socket.onclose = () => this.updateStatus(false);
-        this.state.socket.onmessage = (event) => {
+        const wsUrl = `${protocol}//${window.location.host}/api/ws/${encodeURIComponent(this.state.currentRoom)}`;
+        const socket = new WebSocket(wsUrl);
+        this.state.socket = socket;
+        const isCurrent = () => this.state.socket === socket; // false once replaced or closed by us
+
+        // Subscribe first, then load history: anything sent in between arrives on the socket.
+        // Pushes that land while history loads wait in `pending`, then dedupe against it.
+        let pending = [];
+        socket.onopen = async () => {
+            this.updateStatus(true);
+            await this.loadHistory(isCurrent);
+            if (!isCurrent()) return;
+            pending.forEach(msg => this.appendMessage(msg));
+            pending = null;
+            this.scrollToBottom();
+        };
+        socket.onclose = () => {
+            if (!isCurrent()) return;
+            this.updateStatus(false);
+            // Dropped (node restart, network): retry; the new socket reloads history on open.
+            // ponytail: fixed 2s retry, exponential backoff if many clients hammer a dead node.
+            setTimeout(() => { if (isCurrent()) this.connectWebSocket(); }, 2000);
+        };
+        socket.onmessage = (event) => {
             try {
                 const msg = JSON.parse(event.data);
                 if (!this.state.knownRooms.has(msg.room_id)) {
                     this.state.knownRooms.add(msg.room_id);
                     this.renderRoomList();
                 }
+                if (pending) return pending.push(msg);
                 this.appendMessage(msg);
                 this.scrollToBottom();
             } catch (e) { console.error("WS Parse Error", e); }
@@ -290,14 +291,14 @@ class ChatApp {
     }
 
     disconnectWebSocket() {
-        if (this.state.socket) {
-            this.state.socket.close();
-            this.state.socket = null;
-        }
+        const socket = this.state.socket;
+        this.state.socket = null; // first, so its onclose knows it was on purpose
+        if (socket) socket.close();
     }
 
     appendMessage(msg) {
-        if (msg.room_id !== this.state.currentRoom) return;
+        if (msg.room_id !== this.state.currentRoom || this.state.shown.has(msg.message_id)) return;
+        this.state.shown.add(msg.message_id);
         
         const container = this.dom.containers.messages;
         if (!container) return;
@@ -393,7 +394,7 @@ class ChatApp {
             const isActive = roomId === this.state.currentRoom;
             const btn = document.createElement('button');
             btn.className = `w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition flex justify-between items-center ${isActive ? 'bg-primary/10 text-primary' : 'text-gray-600 hover:bg-gray-100'}`;
-            btn.innerHTML = `<span># ${roomId}</span>`;
+            btn.textContent = `# ${roomId}`; // room names come from peers: never parse them as HTML
             btn.onclick = () => this.switchRoom(roomId);
             list.appendChild(btn);
         });

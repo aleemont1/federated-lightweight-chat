@@ -10,29 +10,6 @@ def test_node_init():
     assert not node.room_clocks
 
 
-def test_join_new_room():
-    """Test clock initialization on room joining."""
-    node = NodeState(node_id="alice", room_clocks={})
-    room = "test"
-
-    node.join_room(room)
-
-    assert room in node.room_clocks
-    assert node.room_clocks[room] == {"alice": 0}
-
-
-def test_join_existing_room_does_not_reset_clock():
-    """If node attempts to join an already joined room,
-    its clock does't have to be resetted."""
-    initial_clock = {"alice": 5, "bob": 3}
-    node = NodeState(node_id="alice", room_clocks={"general": initial_clock})
-
-    node.join_room("general")
-
-    assert node.room_clocks["general"] == initial_clock
-    assert node.room_clocks["general"]["alice"] == 5
-
-
 def test_get_clock_default():
     """When asking for an unknown room's clock, it should return a safe value."""
     node = NodeState(node_id="alice", room_clocks={})
@@ -42,24 +19,16 @@ def test_get_clock_default():
     assert "not_joined_room" not in node.room_clocks
 
 
-def test_increment_clock():
-    """Verifies that incrementing clock updates current node's counter"""
-    node = NodeState(node_id="alice", room_clocks={})
-    room = "chat1"
-    node.join_room(room)
+def test_next_clock_is_only_committed_by_update():
+    """next_clock proposes this replica's next entry; nothing moves until update_clock."""
+    node = NodeState(node_id="alice", room_clocks={"chat1": {"bob": 5}})
 
-    new_clock = node.increment_clock(room)
+    proposed = node.next_clock("chat1")
 
-    assert new_clock["alice"] == 1
-    assert node.get_clock(room)["alice"] == 1
-
-    node.room_clocks[room]["bob"] = 5
-    node.increment_clock(room)
-
-    final_clock = node.get_clock(room)
-
-    assert final_clock["alice"] == 2
-    assert final_clock["bob"] == 5
+    assert proposed == {"alice": 1, "bob": 5}
+    assert node.next_clock("chat1") == proposed  # still uncommitted
+    node.update_clock("chat1", proposed)
+    assert node.next_clock("chat1") == {"alice": 2, "bob": 5}
 
 
 def test_update_clock_merge():

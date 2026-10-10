@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Joining Network...</title>
+    <link href="/static/css/styles.css" rel="stylesheet">
+</head>
+<body class="bg-slate-100 h-screen flex flex-col items-center justify-center p-4">
+
+    <div class="bg-white p-8 rounded-2xl shadow-xl text-center max-w-sm w-full">
+        <div class="relative w-16 h-16 mx-auto mb-6">
+            <div class="absolute inset-0 border-4 border-slate-100 rounded-full"></div>
+            <div class="absolute inset-0 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
+        </div>
+
+        <h2 class="text-xl font-bold text-slate-800 mb-2">Starting {{ user }}'s node</h2>
+        <p class="text-slate-500 text-sm">Catching up with the network...</p>
+
+        <div class="mt-8 pt-6 border-t border-slate-100">
+            <p class="text-xs text-slate-400">If you are not redirected automatically,<br>
+            <a href="{{ node_url }}" class="text-primary hover:underline">click here</a>.</p>
+        </div>
+    </div>
+
+    <script>
+        // The node is routable once healthy; poll the orchestrator until then.
+        async function poll() {
+            try {
+                const res = await fetch("/status/{{ user }}");
+                if ((await res.json()).ready) return location.replace("{{ node_url }}");
+            } catch (e) { /* orchestrator hiccup: keep polling */ }
+            setTimeout(poll, 1000);
+        }
+        poll();
+    </script>
+</body>
+</html>

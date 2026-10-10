@@ -1,28 +1,33 @@
 """
 Unit tests for API Routes.
 Uses FastAPI TestClient to simulate HTTP requests and WebSockets.
-Mocks core services (NodeService, AuthProvider, ConnectionManager) to test endpoints in isolation.
+Mocks core services (NodeService, ConnectionManager) to test endpoints in isolation.
 """
 
-# Disable this warning as it is a false positive caused by pytest syntax
-# pylint: disable=redefined-outer-name
-# pylint: disable=unused-argument
-
-import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 # Import the module we are patching to use patch.object (safer than string strings)
 import src.api.routes
-from src.api.dependencies import get_current_user
-from src.core.auth_models import User
 from src.core.message import Message
 from src.main import app
 
 # Create TestClient
 client = TestClient(app)
+TOKEN = "node-secret"
+
+
+@pytest.fixture(autouse=True)
+def session():
+    """Configures the node token and logs the test client in with it."""
+    with patch.object(src.api.routes.settings, "node_token", TOKEN):
+        client.cookies.set(src.api.routes.SESSION_COOKIE, TOKEN)
+        yield
+        client.cookies.clear()
+
 
 # --- Fixtures ---
 
@@ -32,9 +37,6 @@ def mock_node_service():
     """Patches the global node_service singleton in the routes module."""
     # Use patch.object for robust patching (avoids string path typos)
     with patch.object(src.api.routes, "node_service") as mock_service:
-        # 1. Setup 'is_initialized' (sync method)
-        mock_service.is_initialized.return_value = True
-
         # 2. Setup 'initialize' (async method) -> Must be AsyncMock
         mock_service.initialize = AsyncMock(return_value=None)
 
@@ -46,22 +48,11 @@ def mock_node_service():
 
         # 4. Setup 'storage' property
         mock_storage = MagicMock()
-        mock_storage.get_all_room_messages.return_value = []
+        mock_storage.get_room_messages.return_value = []
         mock_storage.get_known_rooms.return_value = ["general", "topic_x"]
-        mock_storage.message_exists.return_value = False
         mock_service.storage = mock_storage
 
         yield mock_service
-
-
-@pytest.fixture
-def mock_auth_provider():
-    """Patches the global auth provider in the routes module."""
-    with patch.object(src.api.routes, "current_auth_provider") as mock_auth:
-        # Crucial: authenticate MUST be an AsyncMock because it's awaited in the route.
-        # We replace the method on the mock object with a fresh AsyncMock.
-        mock_auth.authenticate = AsyncMock()
-        yield mock_auth
 
 
 @pytest.fixture
@@ -79,26 +70,12 @@ def mock_websocket_manager():
             await websocket.accept()
 
         mock_mgr.connect = AsyncMock(side_effect=mock_connect_side_effect)
-        mock_mgr.publish = AsyncMock()
-        mock_mgr.broadcast = AsyncMock()
         # Setup sync methods
         mock_mgr.disconnect = MagicMock()
         yield mock_mgr
 
 
-@pytest.fixture
-def override_auth_dependency():
-    """Overrides the get_current_user dependency to bypass auth checks."""
-    user_id = uuid.UUID("123e4567-e89b-12d3-a456-426614174000")
-    user = User(id=user_id, username="test_user", is_authenticated=True)
-    app.dependency_overrides[get_current_user] = lambda: user
-    yield user
-    app.dependency_overrides = {}
-
-
 # --- Tests ---
-# Disable this warning as it is a false positive caused by pytest syntax
-# pylint: disable=unused-argument
 
 
 def test_health_check(mock_node_service):
@@ -111,47 +88,30 @@ def test_health_check(mock_node_service):
     assert data["initialized"] is True
 
 
-@pytest.mark.asyncio
-async def test_login_success(mock_auth_provider, mock_node_service):
-    """Test successful login."""
-    # 1. Prepare valid User object
-    user_id = uuid.UUID("123e4567-e89b-12d3-a456-426614174000")
-    fake_user = User(id=user_id, username="alice", is_authenticated=True)
-
-    # 2. Configure Auth Mock to return this user when awaited
-    mock_auth_provider.authenticate.return_value = fake_user
-
-    # 3. Simulate Node NOT initialized yet (so it triggers initialization)
-    mock_node_service.is_initialized.return_value = False
-
-    # 4. Perform Request
-    response = client.post("/api/login", json={"username": "alice", "password": ""})
-
-    # 5. Verify
-    assert response.status_code == 200
-    data = response.json()
-    assert data["username"] == "alice"
-    assert data["id"] == str(user_id)
-
-    # Verify initialize called
-    mock_node_service.initialize.assert_awaited_once_with("alice")
+@pytest.mark.parametrize(
+    "method,path",
+    [("get", "/api/rooms"), ("get", "/api/messages"), ("post", "/api/internal/sync")],
+)
+def test_routes_wait_for_initialization(mock_node_service, method, path):
+    """Until the node has started, data routes answer 503 instead of crashing."""
+    mock_node_service.storage = None
+    response = getattr(client, method)(path, **({"json": {}} if method == "post" else {}))
+    assert response.status_code == 503
 
 
-@pytest.mark.asyncio
-async def test_login_failure(mock_auth_provider):
-    """Test login failure."""
-    # Configure Auth Mock to return None
-    mock_auth_provider.authenticate.return_value = None
-
-    response = client.post("/api/login", json={"username": "bad", "password": ""})
-
-    assert response.status_code == 401
+def test_send_message_waits_for_initialization(mock_node_service):
+    """Sending before startup is refused, not attempted."""
+    mock_node_service.storage = None
+    mock_node_service.send = AsyncMock()
+    response = client.post("/api/messages", json={"content": "hi", "room_id": "general"})
+    assert response.status_code == 503
+    mock_node_service.send.assert_not_awaited()
 
 
-def test_get_messages(mock_node_service, override_auth_dependency):
+def test_get_messages(mock_node_service):
     """Test retrieving messages."""
     mock_msg = Message(room_id="general", sender_id="bob", content="hello")
-    mock_node_service.storage.get_all_room_messages.return_value = [mock_msg]
+    mock_node_service.storage.get_room_messages.return_value = [mock_msg]
 
     response = client.get("/api/messages?room_id=general&limit=10")
 
@@ -159,9 +119,16 @@ def test_get_messages(mock_node_service, override_auth_dependency):
     data = response.json()
     assert len(data) == 1
     assert data[0]["content"] == "hello"
+    mock_node_service.storage.get_room_messages.assert_called_once_with(room_id="general", limit=10, offset=0)
 
 
-def test_get_rooms(mock_node_service, override_auth_dependency):
+def test_get_messages_rejects_unbounded_page(mock_node_service):
+    """Page size is capped so a client can't dump the whole DB in one request."""
+    assert client.get("/api/messages?limit=100000").status_code == 422
+    assert client.get("/api/messages?offset=-1").status_code == 422
+
+
+def test_get_rooms(mock_node_service):
     """Test retrieving known rooms."""
     response = client.get("/api/rooms")
     assert response.status_code == 200
@@ -170,55 +137,35 @@ def test_get_rooms(mock_node_service, override_auth_dependency):
     assert "topic_x" in data
 
 
-def test_send_message(mock_node_service, override_auth_dependency, mock_websocket_manager):
-    """Test sending a message (and verifying Redis publish)."""
-    payload = {"content": "Hello World", "room_id": "general"}
+def test_send_message(mock_node_service):
+    """Sending delegates to the node service, which stores and replicates."""
+    sent = Message(room_id="general", sender_id="test_user", content="Hello World")
+    mock_node_service.send = AsyncMock(return_value=sent)
 
-    response = client.post("/api/messages", json=payload)
+    response = client.post("/api/messages", json={"content": "Hello World", "room_id": "general"})
 
     assert response.status_code == 201
     assert response.json()["content"] == "Hello World"
-
-    mock_node_service.state.increment_clock.assert_called_with("general")
-    mock_node_service.storage.add_message.assert_called_once()
-
-    # VERIFY: Message published to Redis
-    mock_websocket_manager.publish.assert_called_once()
-    # Optional: Verify args
-    args, _ = mock_websocket_manager.publish.call_args
-    assert args[0].content == "Hello World"
-    assert args[1] == "general"
+    mock_node_service.send.assert_awaited_once_with("general", "Hello World")
 
 
-@pytest.mark.asyncio
-async def test_replication_receive(mock_node_service, mock_websocket_manager):
-    """Test receiving gossip (and verifying Redis publish is NOT called)."""
-    msg_payload = Message(room_id="general", sender_id="remote", content="sync").model_dump(mode="json")
+def test_internal_sync_returns_missing_messages(mock_node_service):
+    """Anti-entropy endpoint answers a peer's summary with what the peer lacks."""
+    missing = Message(room_id="general", sender_id="test_user", content="you missed this")
+    mock_node_service.storage.missing_messages.return_value = [missing]
 
-    response = client.post("/api/replication", json=msg_payload)
+    response = client.post("/api/internal/sync", json={"general": {"test_user": [[1, 2]]}})
 
     assert response.status_code == 200
-    assert response.json()["status"] == "replicated"
-
-    mock_node_service.state.update_clock.assert_called()
-    mock_node_service.storage.add_message.assert_called()
-
-    # VERIFY FIX: Replication should NOT trigger Redis publish to avoid loops
-    mock_websocket_manager.publish.assert_not_called()
+    assert response.json()[0]["content"] == "you missed this"
+    mock_node_service.storage.missing_messages.assert_called_once_with({"general": {"test_user": [(1, 2)]}})
 
 
-def test_replication_idempotency(mock_node_service, mock_websocket_manager):
-    """Test ignoring duplicates."""
-    mock_node_service.storage.message_exists.return_value = True
-    msg_payload = Message(room_id="general", sender_id="remote", content="sync").model_dump(mode="json")
-
-    response = client.post("/api/replication", json=msg_payload)
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "ignored"
-    mock_node_service.storage.add_message.assert_not_called()
-    # Should NOT publish if ignored
-    mock_websocket_manager.publish.assert_not_called()
+@pytest.mark.parametrize("ranges", ["lots", [[1]], [["a", "b"]], 7])
+def test_internal_sync_rejects_malformed_summary(mock_node_service, ranges):
+    """Each writer maps to a list of [low, high] integer pairs."""
+    response = client.post("/api/internal/sync", json={"general": {"bob": ranges}})
+    assert response.status_code == 422
 
 
 def test_websocket_endpoint(mock_websocket_manager):
@@ -239,3 +186,93 @@ def test_websocket_endpoint(mock_websocket_manager):
 
     # After context exit (disconnect), verify disconnect called
     mock_websocket_manager.disconnect.assert_called_once()
+
+
+# --- Authentication ---
+
+
+def test_auth_link_sets_session_cookie():
+    """The orchestrator's login link is traded for the session cookie, then the chat loads."""
+    client.cookies.clear()
+    response = client.get(f"/api/auth?token={TOKEN}", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/"
+    assert f"{src.api.routes.SESSION_COOKIE}={TOKEN}" in response.headers["set-cookie"]
+    assert "httponly" in response.headers["set-cookie"].lower()
+    assert "secure" not in response.headers["set-cookie"].lower()  # plain HTTP locally
+
+
+def test_session_cookie_is_secure_with_tls():
+    """Behind HTTPS the cookie must never travel over plain HTTP."""
+    client.cookies.clear()
+    with patch.object(src.api.routes.settings, "tls", True):
+        response = client.get(f"/api/auth?token={TOKEN}", follow_redirects=False)
+    assert "secure" in response.headers["set-cookie"].lower()
+
+
+def test_logout_clears_only_this_browsers_cookie(mock_node_service):
+    """Logout ends the session here; the node and the token stay valid for other browsers."""
+    response = client.post("/api/logout", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/"
+    assert f'{src.api.routes.SESSION_COOKIE}=""' in response.headers["set-cookie"]
+    mock_node_service.shutdown.assert_not_called()
+
+
+@pytest.mark.parametrize("token", ["wrong", "", "\u00e9"])
+def test_auth_link_rejects_bad_token(token):
+    """Wrong, empty and non-ASCII tokens are refused (non-ASCII must not crash the comparison)."""
+    assert client.get("/api/auth", params={"token": token}).status_code == 401
+
+
+def test_auth_fails_closed_without_configured_token():
+    """A node started without NODE_TOKEN accepts nobody, not everybody."""
+    with patch.object(src.api.routes.settings, "node_token", ""):
+        assert client.get("/api/auth", params={"token": ""}).status_code == 401
+        assert client.get("/api/rooms").status_code == 401
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [("get", "/api/rooms"), ("get", "/api/messages"), ("post", "/api/messages")],
+)
+def test_browser_routes_require_session(mock_node_service, method, path):
+    """Without the cookie, someone who knows the subdomain can't read or post as the user."""
+    client.cookies.clear()
+    kwargs = {"json": {"content": "hi", "room_id": "general"}} if method == "post" else {}
+    assert getattr(client, method)(path, **kwargs).status_code == 401
+
+
+def test_health_and_internal_sync_need_no_session(mock_node_service):
+    """Health is public; internal sync is guarded by the gateway, not by the cookie."""
+    client.cookies.clear()
+    mock_node_service.storage.missing_messages.return_value = []
+    assert client.get("/api/health").status_code == 200
+    assert client.post("/api/internal/sync", json={"general": {"alice": [[1, 5]]}}).status_code == 200
+
+
+def test_websocket_requires_session(mock_websocket_manager):
+    """The socket is closed before subscribing anyone without the cookie."""
+    client.cookies.clear()
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/api/ws/general"):
+            pass
+    mock_websocket_manager.connect.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"content": "", "room_id": "general"},
+        {"content": "x" * 4001, "room_id": "general"},
+        {"content": "hi", "room_id": "<img src=x onerror=alert(1)>"},
+        {"content": "hi", "room_id": "a" * 33},
+    ],
+)
+def test_send_message_validates_input(mock_node_service, payload):
+    """Empty or huge messages and room names outside [a-z0-9-]{1,32} are refused."""
+    mock_node_service.send = AsyncMock()
+    assert client.post("/api/messages", json=payload).status_code == 422
+    mock_node_service.send.assert_not_awaited()

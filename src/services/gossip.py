@@ -1,138 +1,176 @@
 """
-Handles background syncing between nodes
+Replication between nodes. Every node holds a full replica of the chat log.
+
+Two paths, so that correctness never depends on Redis:
+- fast path: each new message is published on Redis pub/sub and stored by every listening node;
+- repair path (anti-entropy): every GOSSIP_INTERVAL seconds a node sends its summary
+  (per room and writer, the ranges of sequence numbers held) to a random peer and pulls
+  what it lacks. This recovers whatever the fast path lost: node offline, Redis down, partitions.
+
+Redis is also the discovery registry: each node refreshes a key with a TTL as its heartbeat.
+The last peer list is kept, so anti-entropy keeps working while Redis is down.
 """
 
 import asyncio
 import logging
 import secrets
+import socket
+from typing import Awaitable, Callable, List, Optional
 
 import httpx
+import redis.asyncio as redis
+from pydantic import ValidationError
 
+from src.config.settings import settings
 from src.core.message import Message
 from src.services.storage import StorageService
 
 logger = logging.getLogger(__name__)
 
+GOSSIP_INTERVAL = 2.0
+HEARTBEAT_TTL = 10
+CHANNEL = "chat"
+PUBLISH_TIMEOUT = 1.0
 
-# pylint: disable=too-few-public-methods
+# A partition black-holes open connections: no reply, no error. The kernel drops a dead one after
+# ~10s instead: keepalive probes catch it when idle (the pub/sub listener), the user timeout when a
+# command awaits its reply. Not socket_timeout: it would also fire on a merely idle listener.
+# Linux names (nodes run in Linux containers); other systems keep what they have, so tests still import.
+KEEPALIVE = {
+    getattr(socket, name): value
+    for name, value in (
+        ("TCP_KEEPIDLE", 5),
+        ("TCP_KEEPINTVL", 2),
+        ("TCP_KEEPCNT", 3),
+        ("TCP_USER_TIMEOUT", 10_000),
+    )
+    if hasattr(socket, name)
+}
+
+
 class GossipService:
-    """Background sync service"""
+    """Keeps this node's replica converging with its peers'."""
 
-    def __init__(self, storage: StorageService, node_id: str, node_addr: str, peers: list[str]):
+    def __init__(
+        self,
+        storage: StorageService,
+        node_id: str,
+        node_addr: str,
+        on_message: Callable[[Message], Awaitable[bool]],
+        on_batch: Optional[Callable[[List[Message]], Awaitable[int]]] = None,
+    ):
         self.storage = storage
-        self.node_id = node_id
         self.node_addr = node_addr
-        self.peers = peers
-        self._running = False
+        self.on_message = on_message
+        self.on_batch = on_batch
+        self._key = f"discovery:node:{node_id}"
+        self.redis = redis.from_url(  # type: ignore[no-untyped-call]
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_keepalive=True,
+            socket_keepalive_options=KEEPALIVE,
+        )
+        self.http = httpx.AsyncClient(timeout=3.0)
+        self._peers: List[str] = []  # last known, used when Redis is unreachable
 
-    async def start(self) -> None:
-        """Start node sync"""
+    async def get_active_peers(self) -> List[str]:
+        """Addresses of the other nodes whose heartbeat is still alive."""
+        peers = []
+        async for key in self.redis.scan_iter(match="discovery:node:*"):
+            if key != self._key and (addr := await self.redis.get(key)):
+                peers.append(addr)
+        return peers
 
-        self._running = True
-        logger.info("[%s] Started syncing. Initial peers: %s", self.node_id, self.peers)
+    async def pull_from(self, peer: str) -> int:
+        """Pulls the messages this node lacks from `peer`. Returns how many were new."""
+        response = await self.http.post(f"{peer.rstrip('/')}/api/internal/sync", json=self.storage.summary())
+        response.raise_for_status()
+        messages = [Message.model_validate(m) for m in response.json()]
+        if not messages:
+            return 0
+        if self.on_batch:
+            return await self.on_batch(messages)
+        return sum([await self.on_message(msg) for msg in messages])
 
+    async def sync_once(self, drain: bool = False) -> int:
+        """
+        One anti-entropy round: heartbeat, then pull from active peers.
+        When drain=False, pulls from a single random peer.
+        When drain=True, attempts to drain missing history across all candidate peers
+        until fully caught up. Returns the number of new messages pulled. Never raises.
+        """
         try:
-            # Initial warmup delay
-            await asyncio.sleep(3)
+            await self.redis.set(self._key, self.node_addr, ex=HEARTBEAT_TTL)
+            self._peers = await self.get_active_peers()
+        except Exception as e:
+            logger.warning("Discovery unavailable, using %d known peers: %s", len(self._peers), e)
+        if not self._peers:
+            return 0
 
-            while self._running:
-                try:
-                    if self.peers:
-                        # Choose a random peer to sync with
-                        target = secrets.choice(self.peers)
-                        if target != self.node_addr:
-                            await self._push_data(target)
-                # pylint: disable=broad-exception-caught
-                except Exception as e:
-                    logger.error("Gossip error: %s", e)
+        if not drain:
+            peers = [secrets.choice(self._peers)]
+        else:
+            peers = list(self._peers)
+            secrets.SystemRandom().shuffle(peers)
 
-                await asyncio.sleep(2)
+        total = 0
+        for peer in peers:
+            try:
+                # Counting only *new* messages guarantees termination: a peer that keeps
+                # resending duplicates (it can't fill our gap either) stops the loop.
+                while new := await self.pull_from(peer):
+                    total += new
+                    if not drain:
+                        break
+                if not drain:
+                    break
+            except Exception as e:
+                logger.warning("Anti-entropy with %s failed: %s", peer, e)
+        if total:
+            logger.info("Anti-entropy: pulled %d messages across candidate peers", total)
+        return total
 
-        finally:
-            # Ensure the flag is reset to False when the task stops, crashes, or is cancelled.
-            logger.info("[%s] Gossip loop terminated.", self.node_id)
-            self._running = False
+    async def run(self) -> None:
+        """Anti-entropy loop."""
+        while True:
+            await asyncio.sleep(GOSSIP_INTERVAL)
+            await self.sync_once()
 
-    def stop(self) -> None:
+    async def publish(self, message: Message) -> None:
         """
-        Signals the gossip loop to stop running.
-        The loop will check this flag and exit gracefully.
+        Fast path. Best effort: if Redis is down, anti-entropy delivers the message later.
+        Bounded, because the user's write waits on it and must not hang during a partition.
         """
-        logger.info("[%s] Stopping gossip service...", self.node_id)
-        self._running = False
+        try:
+            await asyncio.wait_for(self.redis.publish(CHANNEL, message.model_dump_json()), PUBLISH_TIMEOUT)
+        except (redis.RedisError, TimeoutError) as e:
+            logger.warning("Publish of %s failed, leaving it to anti-entropy: %s", message.message_id, e)
 
-    async def sync_room_messages(self, room_id: str) -> None:
-        """
-        Actively pulls messages for a specific room from random peers.
-        This is an 'Anti-Entropy' pull mechanism triggered by user actions (joining a room).
-        """
-        if not self.peers:
-            return
+    async def listen(self) -> None:
+        """Stores every message published by any node. Resubscribes after Redis errors."""
+        while True:
+            try:
+                async with self.redis.pubsub() as pubsub:
+                    await pubsub.subscribe(CHANNEL)
+                    async for item in pubsub.listen():
+                        if item["type"] != "message":
+                            continue
+                        try:
+                            msg = Message.model_validate_json(item["data"])
+                        except ValidationError as e:
+                            logger.warning("Dropping malformed pub/sub message: %s", e)
+                            continue
+                        await self.on_message(msg)
+            except Exception as e:
+                logger.warning("Pub/sub listener failed, resubscribing: %s", e)
+                await asyncio.sleep(GOSSIP_INTERVAL)
 
-        # Try up to 3 random peers to spread load and increase chance of finding data
-        # We use SystemRandom to ensure cryptographic randomness is not needed but good practice
-        targets = secrets.SystemRandom().sample(self.peers, min(len(self.peers), 3))
-
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            for target in targets:
-                if target == self.node_addr:
-                    continue
-
-                try:
-                    # Construct URL. Assuming standard API structure based on peer base URL.
-                    base_url = target.rstrip("/")
-                    url = f"{base_url}/api/messages"
-
-                    # Fetch messages for the room
-                    response = await client.get(url, params={"room_id": room_id, "limit": 100})
-
-                    if response.status_code == 200:
-                        messages_data = response.json()
-                        new_count = 0
-
-                        for msg_data in messages_data:
-                            # Parse and validate
-                            try:
-                                msg = Message(**msg_data)
-
-                                # Idempotency Check: Don't overwrite if exists
-                                if not self.storage.message_exists(msg.message_id):
-                                    self.storage.add_message(msg)
-                                    # Note: We rely on standard add_message logic.
-                                    # In a full vector clock implementation, we might merge clocks here too.
-                                    new_count += 1
-                            except Exception as e:
-                                logger.warning("Failed to parse synced message: %s", e)
-
-                        if new_count > 0:
-                            logger.info(
-                                "Synced %d new messages for room '%s' from %s", new_count, room_id, target
-                            )
-                            # Optimization: If we found data, maybe we can stop?
-                            # Or keep going to ensure convergence. Let's keep going for robustness.
-
-                except Exception as e:
-                    logger.warning("Failed to sync room '%s' from peer %s: %s", room_id, target, e)
-
-    async def _push_data(self, target: str) -> None:
-        """Push data to a target node"""
-        msgs = self.storage.get_all_messages()
-        if not msgs:
-            return
-
-        # Ensure we don't double-slash if target has trailing slash
-        base_url = target.rstrip("/")
-        # FIX: The API router is mounted at /api, so the endpoint is /api/replication
-        replication_url = f"{base_url}/api/replication"
-
-        async with httpx.AsyncClient(timeout=1.0) as client:
-            for msg in msgs:
-                try:
-                    payload = msg.model_dump(mode="json")
-                    await client.post(
-                        replication_url,
-                        json=payload,
-                        headers={"X-Origin-Node": self.node_addr},
-                    )
-                except httpx.HTTPError as e:
-                    logger.debug("Failed to push gossip to %s: %s", target, e)
+    async def close(self) -> None:
+        """Leaves the discovery registry and releases connections."""
+        try:
+            await self.redis.delete(self._key)
+        except redis.RedisError as e:
+            logger.warning("Failed to cleanup discovery key during shutdown: %s", e)
+        await self.redis.aclose()
+        await self.http.aclose()

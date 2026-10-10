@@ -1,21 +1,24 @@
 """
 API Routes definition.
-Handles Authentication, Chat operations, Node management, and Real-time WebSockets.
+Handles chat operations, node health, real-time WebSockets and node-to-node sync.
+
+Browser routes require the session cookie set by /auth. /health is public and /internal
+is not routed by the gateway, so only other nodes on the Docker network reach it.
 """
 
+import hmac
 import logging
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi.requests import HTTPConnection
+from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, Field
 
-from src.api.dependencies import get_current_user
-from src.core.auth_models import LoginRequest, User
+from src.config.settings import settings
 from src.core.message import Message
-from src.services.auth import current_auth_provider
 from src.services.node import node_service
-
-# New Import for Real-Time Broadcasting
+from src.services.storage import StorageService, Summary
 from src.services.websocket import manager
 
 logger = logging.getLogger(__name__)
@@ -23,132 +26,93 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+SESSION_COOKIE = "flc_session"
+
+
 class SendMessageRequest(BaseModel):
     """Payload for sending a message."""
 
-    content: str
-    room_id: str
+    content: str = Field(min_length=1, max_length=4000)
+    room_id: str = Field(pattern=r"^[a-z0-9-]{1,32}$")
 
 
-# === PUBLIC ROUTES ===
+def _is_token(value: str) -> bool:
+    """Constant-time check against this node's token. Fails closed when none is configured."""
+    return bool(settings.node_token) and hmac.compare_digest(value.encode(), settings.node_token.encode())
 
 
-@router.post("/login", response_model=User)
-async def login(credentials: LoginRequest) -> User:
-    """
-    Login endpoint.
-    1. Authenticates user via AuthProvider
-    2. Initializes the local NodeService
-    """
+def has_session(conn: HTTPConnection) -> bool:
+    """True if the request carries the session cookie of this node's user."""
+    return _is_token(conn.cookies.get(SESSION_COOKIE, ""))
 
-    user = await current_auth_provider.authenticate(credentials)
 
-    if not user or not user.is_authenticated:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials.")
+def require_session(conn: HTTPConnection) -> None:
+    """Dependency: 401 unless the browser logged in through the orchestrator."""
+    if not has_session(conn):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Log in through the orchestrator."
+        )
 
-    if not node_service.is_initialized():
-        try:
-            await node_service.initialize(user.username)
-        except Exception as e:
-            logger.error("Initialization failed: %s", e)
 
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Node initialization failed: {str(e)}",
-            )
+def get_storage() -> StorageService:
+    """Dependency: the node's storage, or 503 while the node is still initializing."""
+    if not node_service.storage:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Node not initialized.")
+    return node_service.storage
 
-    return user
+
+@router.get("/auth")
+async def auth(token: str) -> RedirectResponse:
+    """Target of the orchestrator's login link: trades the URL token for a session cookie."""
+    if not _is_token(token):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid login link.")
+    response = RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
+    response.set_cookie(SESSION_COOKIE, token, path="/", samesite="lax", httponly=True, secure=settings.tls)
+    return response
+
+
+@router.post("/logout")
+async def logout() -> RedirectResponse:
+    """Ends the session in this browser only: the node keeps running for the others."""
+    # Back to "/": without a session the page sends the browser on to the orchestrator.
+    response = RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
+    response.delete_cookie(SESSION_COOKIE, path="/", samesite="lax", httponly=True, secure=settings.tls)
+    return response
 
 
 @router.get("/health")
 async def health_check() -> Dict[str, Any]:
     """Returns the node status"""
-    is_ready = node_service.is_initialized()
-    node_id = node_service.state.node_id if is_ready and node_service.state else None
-
-    return {"status": "online", "initialized": is_ready, "node_id": node_id}
+    node_id = node_service.state.node_id if node_service.state else None
+    return {"status": "online", "initialized": node_id is not None, "node_id": node_id}
 
 
-# === Protected routes ===
+@router.get("/rooms", response_model=List[str], dependencies=[Depends(require_session)])
+async def get_rooms(storage: StorageService = Depends(get_storage)) -> List[str]:
+    """Rooms this node holds messages for."""
+    return storage.get_known_rooms()
 
 
-@router.get("/me", response_model=User)
-async def get_me(current_user: User = Depends(get_current_user)) -> User:
-    """Returns the current user profile"""
-    return current_user
-
-
-@router.get("/rooms", response_model=List[str])
-async def get_rooms(current_user: User = Depends(get_current_user)) -> List[str]:
-    """
-    Retrieves the list of rooms this node has participated in.
-    """
-    if not node_service.storage:
-        raise HTTPException(status_code=500, detail="Storage not ready")
-
-    return node_service.storage.get_known_rooms()
-
-
-@router.post("/rooms/{room_id}/sync")
-async def sync_room(room_id: str, current_user: User = Depends(get_current_user)) -> Dict[str, str]:
-    """
-    Triggers an immediate background sync for a specific room.
-    Useful when joining a room to get history faster than random gossip.
-    """
-    if not node_service.is_initialized():
-        raise HTTPException(status_code=500, detail="Node not ready")
-
-    logger.info("Manual sync requested for room: %s", room_id)
-    # We await this to ensure data is populated before the frontend reloads history
-    await node_service.sync_room(room_id)
-
-    return {"status": "synced", "room_id": room_id}
-
-
-@router.get("/messages", response_model=List[Message])
+@router.get("/messages", response_model=List[Message], dependencies=[Depends(require_session)])
 async def get_messages(
-    room_id: str = "general", limit: int = 50, offset: int = 0, current_user: User = Depends(get_current_user)
+    room_id: str = "general",
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    storage: StorageService = Depends(get_storage),
 ) -> List[Message]:
-    """
-    Retrieves all messages for a room
-    """
-    if not node_service.storage:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Storage not ready.")
-
-    messages = node_service.storage.get_all_room_messages(room_id=room_id, limit=limit, offset=offset)
-
-    return messages
+    """A page of a room's history in causal order (offset=0 is the newest page)."""
+    return storage.get_room_messages(room_id=room_id, limit=limit, offset=offset)
 
 
-@router.post("/messages", response_model=Message, status_code=status.HTTP_201_CREATED)
-async def send_message(
-    payload: SendMessageRequest, current_user: User = Depends(get_current_user)
-) -> Message:
-
-    if not node_service.state or not node_service.storage:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Node service unavailable."
-        )
-
-    node_service.state.increment_clock(payload.room_id)
-    current_clock = node_service.state.get_clock(payload.room_id)
-
-    new_msg = Message(
-        room_id=payload.room_id,
-        sender_id=current_user.username,
-        content=payload.content,
-        vector_clock=current_clock,
-    )
-
-    # 1. Persist locally
-    node_service.storage.add_message(new_msg)
-
-    # 2. Publish to Redis (Trigger Real-time broadcast across cluster)
-    # Only the node that RECEIVES the message from the client publishes it to Redis.
-    # This prevents echo loops where every node re-publishes the same message upon replication.
-    await manager.publish(new_msg, payload.room_id)
-
-    return new_msg
+@router.post(
+    "/messages",
+    response_model=Message,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_session), Depends(get_storage)],
+)
+async def send_message(payload: SendMessageRequest) -> Message:
+    """Creates a message on this node and replicates it."""
+    return await node_service.send(payload.room_id, payload.content)
 
 
 # === WebSocket Route ===
@@ -157,47 +121,29 @@ async def send_message(
 @router.websocket("/ws/{room_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: str) -> None:
     """
-    Real-time chat endpoint.
-    Manages the connection lifecycle and subscribes the user to the room's Redis channel.
+    Real-time chat endpoint: pushes the room's new messages to the browser.
+    Messages are sent upstream via POST /messages; we only read to notice disconnects.
     """
+    if not has_session(websocket):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
     await manager.connect(websocket, room_id)
     try:
         while True:
-            # We keep the connection open.
-            # Currently, we assume upstream messages come via HTTP POST /messages,
-            # but we listen here to handle client disconnects gracefully.
             await websocket.receive_text()
     except WebSocketDisconnect:
+        pass
+    finally:
         manager.disconnect(websocket, room_id)
 
 
-# === Replication route (for P2P) ===
+# === Anti-entropy route (node to node) ===
 
 
-@router.post("/replication")
-async def replication_endpoint(message: Message) -> Dict[str, str]:
+@router.post("/internal/sync", response_model=List[Message])
+async def internal_sync(have: Summary, storage: StorageService = Depends(get_storage)) -> List[Message]:
     """
-    Endpoint called by other nodes to gossip messages.
+    Called by peers during anti-entropy: given what the peer holds,
+    returns the messages it is missing.
     """
-    if not node_service.is_initialized() or not node_service.state or not node_service.storage:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Node not ready to receive replication."
-        )
-
-    if node_service.storage.message_exists(message.message_id):
-        return {"status": "ignored"}
-
-    # Merge my vector clocks with the received one.
-    node_service.state.update_clock(message.room_id, message.vector_clock)
-
-    # Save
-    node_service.storage.add_message(message)
-
-    # FIX: Do NOT publish to Redis here.
-    # The message was already published by the node that created it.
-    # Publishing here causes N x N message flooding (Echo Chamber).
-    # Redis takes care of real-time. Gossip takes care of eventual persistence.
-
-    logger.info("Replicated message %s from %s", message.message_id, message.sender_id)
-
-    return {"status": "replicated"}
+    return storage.missing_messages(have)
