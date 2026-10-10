@@ -238,10 +238,24 @@ class ChatApp {
     connectWebSocket() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/api/ws/${encodeURIComponent(this.state.currentRoom)}`;
-        this.state.socket = new WebSocket(wsUrl);
-        this.state.socket.onopen = () => this.updateStatus(true);
-        this.state.socket.onclose = () => this.updateStatus(false);
-        this.state.socket.onmessage = (event) => {
+        const socket = new WebSocket(wsUrl);
+        this.state.socket = socket;
+        socket.onopen = () => this.updateStatus(true);
+        socket.onclose = () => {
+            this.updateStatus(false);
+            // Dropped (node restart, network): retry, reloading history to fill the gap.
+            // A socket we closed on purpose (room switch) is no longer state.socket.
+            // ponytail: fixed 2s retry, exponential backoff if many clients hammer a dead node.
+            const stillCurrent = () => this.state.socket === socket; // false after a room switch
+            if (stillCurrent()) {
+                setTimeout(async () => {
+                    if (!stillCurrent()) return;
+                    await this.loadHistory();
+                    if (stillCurrent()) this.connectWebSocket();
+                }, 2000);
+            }
+        };
+        socket.onmessage = (event) => {
             try {
                 const msg = JSON.parse(event.data);
                 if (!this.state.knownRooms.has(msg.room_id)) {

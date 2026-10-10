@@ -8,6 +8,7 @@ Two paths, so that correctness never depends on Redis:
   what it lacks. This recovers whatever the fast path lost: node offline, Redis down, partitions.
 
 Redis is also the discovery registry: each node refreshes a key with a TTL as its heartbeat.
+The last peer list is kept, so anti-entropy keeps working while Redis is down.
 """
 
 import asyncio
@@ -38,7 +39,7 @@ class GossipService:
         storage: StorageService,
         node_id: str,
         node_addr: str,
-        on_message: Callable[[Message], Awaitable[None]],
+        on_message: Callable[[Message], Awaitable[bool]],
     ):
         self.storage = storage
         self.node_addr = node_addr
@@ -48,6 +49,7 @@ class GossipService:
             settings.redis_url, decode_responses=True
         )
         self.http = httpx.AsyncClient(timeout=3.0)
+        self._peers: List[str] = []  # last known, used when Redis is unreachable
 
     async def get_active_peers(self) -> List[str]:
         """Addresses of the other nodes whose heartbeat is still alive."""
@@ -58,25 +60,38 @@ class GossipService:
         return peers
 
     async def pull_from(self, peer: str) -> int:
-        """Pulls the messages this node lacks from `peer`. Returns how many were received."""
+        """Pulls the messages this node lacks from `peer`. Returns how many were new."""
         response = await self.http.post(f"{peer.rstrip('/')}/api/internal/sync", json=self.storage.summary())
         response.raise_for_status()
         messages = [Message.model_validate(m) for m in response.json()]
-        for msg in messages:
-            await self.on_message(msg)
-        return len(messages)
+        return sum([await self.on_message(msg) for msg in messages])
 
-    async def sync_once(self) -> None:
-        """One anti-entropy round: heartbeat, then pull from a random peer. Never raises."""
+    async def sync_once(self, drain: bool = False) -> int:
+        """
+        One anti-entropy round: heartbeat, then pull from a random peer; with `drain`, keep
+        pulling from it until it has nothing new for us. Returns the new messages. Never raises.
+        """
         try:
             await self.redis.set(self._key, self.node_addr, ex=HEARTBEAT_TTL)
-            peers = await self.get_active_peers()
-            if peers:
-                peer = secrets.choice(peers)
-                if received := await self.pull_from(peer):
-                    logger.info("Anti-entropy: pulled %d messages from %s", received, peer)
+            self._peers = await self.get_active_peers()
         except Exception as e:
-            logger.warning("Anti-entropy round failed: %s", e)
+            logger.warning("Discovery unavailable, using %d known peers: %s", len(self._peers), e)
+        if not self._peers:
+            return 0
+
+        peer, total = secrets.choice(self._peers), 0
+        try:
+            # Counting only *new* messages guarantees termination: a peer that keeps
+            # resending duplicates (it can't fill our gap either) stops the loop.
+            while new := await self.pull_from(peer):
+                total += new
+                if not drain:
+                    break
+        except Exception as e:
+            logger.warning("Anti-entropy with %s failed: %s", peer, e)
+        if total:
+            logger.info("Anti-entropy: pulled %d messages from %s", total, peer)
+        return total
 
     async def run(self) -> None:
         """Anti-entropy loop."""

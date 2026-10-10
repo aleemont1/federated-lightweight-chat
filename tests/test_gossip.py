@@ -21,9 +21,11 @@ def make_node(tmp_path, name):
     storage = StorageService(str(tmp_path / f"{name}.db"))
     state = NodeState(name, {})
 
-    async def ingest(msg: Message) -> None:
-        if storage.add_message(msg):
-            state.update_clock(msg.room_id, msg.vector_clock)
+    async def ingest(msg: Message) -> bool:
+        if not storage.add_message(msg):
+            return False
+        state.update_clock(msg.room_id, msg.vector_clock)
+        return True
 
     return storage, state, ingest
 
@@ -47,6 +49,7 @@ def gossip_towards(storage, ingest, peer_storage):
 
     service = GossipService(storage, "me", "http://me", on_message=ingest)
     service.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service.redis = AsyncMock()  # discovery: the peer list is set by each test
     return service
 
 
@@ -119,6 +122,52 @@ async def test_sync_once_survives_unreachable_peer(tmp_path):
 
     service.http = httpx.AsyncClient(transport=httpx.MockTransport(down))
 
-    await service.sync_once()
+    assert await service.sync_once() == 0
 
     service.redis.set.assert_awaited_once_with("discovery:node:bob", "http://bob", ex=10)
+
+
+@pytest.mark.asyncio
+async def test_drain_catches_up_in_one_call(tmp_path):
+    """At startup a node drains one peer, not just one 500-message batch (or it could reuse seqs)."""
+    a_storage, a_state, _ = make_node(tmp_path, "alice")
+    b_storage, _, b_ingest = make_node(tmp_path, "bob")
+    for i in range(1200):
+        write(a_storage, a_state, "bulk", f"m{i}")
+    gossip = gossip_towards(b_storage, b_ingest, a_storage)
+    gossip.get_active_peers = AsyncMock(return_value=["http://alice"])  # type: ignore[method-assign]
+
+    assert await gossip.sync_once(drain=True) == 1200
+    assert b_storage.summary() == {"bulk": {"alice": 1200}}
+
+
+@pytest.mark.asyncio
+async def test_drain_stops_when_peer_only_has_duplicates(tmp_path):
+    """Both replicas miss alice's seq 2: the peer keeps resending seq 3, which must not loop forever."""
+    a_storage, a_state, _ = make_node(tmp_path, "alice")
+    b_storage, _, b_ingest = make_node(tmp_path, "bob")
+    msgs = [write(a_storage, a_state, "general", c) for c in ("one", "two", "three")]
+    peer_storage = StorageService(str(tmp_path / "peer.db"))
+    for m in (msgs[0], msgs[2]):
+        peer_storage.add_message(m)
+        await b_ingest(m)
+    gossip = gossip_towards(b_storage, b_ingest, peer_storage)
+    gossip.get_active_peers = AsyncMock(return_value=["http://peer"])  # type: ignore[method-assign]
+
+    assert await gossip.sync_once(drain=True) == 0
+
+
+@pytest.mark.asyncio
+async def test_anti_entropy_survives_redis_outage(tmp_path):
+    """With discovery down, the last known peers are still used: Redis is not needed to repair."""
+    a_storage, a_state, _ = make_node(tmp_path, "alice")
+    b_storage, _, b_ingest = make_node(tmp_path, "bob")
+    gossip = gossip_towards(b_storage, b_ingest, a_storage)
+    gossip.get_active_peers = AsyncMock(return_value=["http://alice"])  # type: ignore[method-assign]
+    await gossip.sync_once()  # learns the peer while Redis is up
+
+    gossip.redis.set.side_effect = ConnectionError("Redis down")
+    write(a_storage, a_state, "general", "sent while Redis was down")
+
+    assert await gossip.sync_once() == 1
+    assert b_storage.get_room_messages("general")[0].content == "sent while Redis was down"

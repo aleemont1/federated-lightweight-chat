@@ -45,7 +45,7 @@ async def test_initialize_catches_up_before_starting_loops(mocks):
     await node.initialize("alice")
 
     gossip = gossip_cls.return_value
-    gossip.sync_once.assert_awaited_once()
+    gossip.sync_once.assert_awaited_once_with(drain=True)
     gossip.run.assert_called_once()
     gossip.listen.assert_called_once()
     assert gossip_cls.call_args.kwargs["on_message"] == node.ingest
@@ -101,8 +101,8 @@ async def test_ingest_is_idempotent(mocks):
     await node.initialize("alice")
     remote = Message(room_id="general", sender_id="bob", content="yo", vector_clock={"bob": 3})
 
-    await node.ingest(remote)
-    await node.ingest(remote)
+    assert await node.ingest(remote) is True
+    assert await node.ingest(remote) is False
 
     manager.broadcast.assert_awaited_once_with(remote)
     assert node.state.get_clock("general") == {"alice": 0, "bob": 3}

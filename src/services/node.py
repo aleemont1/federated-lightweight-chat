@@ -52,18 +52,21 @@ class NodeService:
             on_message=self.ingest,
         )
         # Catch up before serving: a node whose DB was lost must learn its own past
-        # sequence numbers before it sends, or it would reuse them.
+        # sequence numbers before it sends, or it would reuse them. Drain one peer fully.
         # ponytail: best effort, if no peer is reachable now the node starts from what it has.
-        await self._gossip.sync_once()
+        await self._gossip.sync_once(drain=True)
         self._tasks = [asyncio.create_task(self._gossip.run()), asyncio.create_task(self._gossip.listen())]
 
-    async def ingest(self, message: Message) -> None:
-        """Applies a message received from a peer. Idempotent, so both replication paths can deliver it."""
-        if not self.state or not self.storage:
-            return
-        if self.storage.add_message(message):
-            self.state.update_clock(message.room_id, message.vector_clock)
-            await manager.broadcast(message)
+    async def ingest(self, message: Message) -> bool:
+        """
+        Applies a message received from a peer. Idempotent, so both replication paths can
+        deliver it. Returns True if the message was new.
+        """
+        if not self.state or not self.storage or not self.storage.add_message(message):
+            return False
+        self.state.update_clock(message.room_id, message.vector_clock)
+        await manager.broadcast(message)
+        return True
 
     async def send(self, room_id: str, content: str) -> Message:
         """Creates a message authored by this node, stores it and replicates it."""
