@@ -5,9 +5,10 @@ on:
   pull_request:
     branches: ["main", "develop"]
   workflow_dispatch: # Allows manual trigger
+  workflow_call: # cd.yml runs the same gates before publishing
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

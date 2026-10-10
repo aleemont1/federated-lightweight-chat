@@ -13,35 +13,7 @@ concurrency:
 jobs:
   tests:
     name: Pre-Deploy Verification
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install Poetry
-        run: |
-          curl -sSL https://install.python-poetry.org | python3 -
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-      - name: Cache Poetry venv
-        uses: actions/cache@v3
-        with:
-          path: .venv
-          key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
-
-      - name: Install Dependencies
-        # FIX: Forziamo Poetry a usare Python 3.12
-        run: |
-          poetry env use 3.12
-          poetry install --no-interaction --no-root --with dev
-
-      - name: Run Tests
-        run: poetry run pytest tests/
+    uses: ./.github/workflows/ci.yml
 
   build-and-push:
     name: Docker Build & Push
@@ -49,7 +21,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
 
     steps:
       - name: Checkout code
@@ -80,8 +51,7 @@ jobs:
           context: .
           file: Dockerfile
           push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/federated-lightweight-chat:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/federated-lightweight-chat:${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

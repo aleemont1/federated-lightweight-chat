@@ -100,7 +100,7 @@ def logout(node: Node) -> None:
 def cluster() -> Iterator[List[Node]]:
     """Three fresh users with running nodes; removed with their data afterwards."""
     with orchestrator() as orch:
-        assert orch.get("/").status_code == 200, "start the stack first: docker compose up -d --build"
+        eventually(lambda: orch.get("/").status_code == 200, what="the orchestrator (is the stack up?)")
     nodes = [login(f"e2e-{RUN}-{name}") for name in ("a", "b", "c")]
     yield nodes
     client = docker.from_env()

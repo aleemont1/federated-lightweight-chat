@@ -1,94 +1,38 @@
 # syntax=docker/dockerfile:1
+# One image for both the user nodes (default CMD) and the orchestrator (compose overrides CMD).
 
-# ==========================================
-# Stage 1: Frontend Builder (Node.js)
-# ==========================================
+# --- Stage 1: Tailwind CSS ---
 FROM node:24-bookworm-slim AS frontend-builder
-
 WORKDIR /app
-
-# Copia i file di dipendenza
-COPY package*.json ./
-
-# Usa npm install per ora (manca package-lock.json nel repo)
-RUN npm install
-
-# Copia i sorgenti e compila il CSS
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
 COPY tailwind.config.js ./
 COPY src ./src
-RUN mkdir -p src/static/css
 RUN npm run build
 
-# ==========================================
-# Stage 2: Python Builder (Dependency Compilation)
-# ==========================================
+# --- Stage 2: Python dependencies in a venv ---
 FROM python:3.12-slim-bookworm AS builder
-
 WORKDIR /app
-
-# Variabili ambiente per pip
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
-
-# Dipendenze di sistema per la build
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Installazione Poetry e Plugin Export (FIX per errore export)
-RUN curl -sSL https://install.python-poetry.org | python3 -
-ENV PATH="/root/.local/bin:$PATH"
-RUN poetry self add poetry-plugin-export
-
+RUN pip install poetry poetry-plugin-export
 COPY pyproject.toml poetry.lock README.md ./
+RUN poetry export -f requirements.txt --output requirements.txt --without-hashes \
+    && python -m venv /app/venv \
+    && /app/venv/bin/pip install -r requirements.txt
 
-# Esportazione requirements.txt standard
-RUN poetry export -f requirements.txt --output requirements.txt --without-hashes
-
-# --- FIX CRITICO: Creazione Virtualenv ---
-# Invece di --target, creiamo un venv completo.
-# Questo garantisce che 'bin/uvicorn' venga generato correttamente.
-RUN python -m venv /app/venv
-
-# Installazione dipendenze nel venv
-RUN /app/venv/bin/pip install -r requirements.txt
-
-# ==========================================
-# Stage 3: Final Runtime (Hardened)
-# ==========================================
+# --- Stage 3: runtime, non-root ---
 FROM python:3.12-slim-bookworm AS runtime
-
 WORKDIR /app
-
-# Creazione utente non-root
-RUN groupadd -r flcuser && useradd -r -g flcuser flcuser
-
-# --- FIX CRITICO: Copia del Virtualenv ---
-# Copiamo l'intero ambiente virtuale dal builder
-COPY --from=builder /app/venv /app/venv
-
-# Aggiungiamo il bin del venv al PATH di sistema
-# Così 'uvicorn' viene trovato immediatamente senza path assoluti
-ENV PATH="/app/venv/bin:$PATH"
-
-# Copia codice applicativo e asset statici
-COPY src ./src
-COPY --from=frontend-builder /app/src/static/css/styles.css /app/src/static/css/styles.css
-
-# Creiamo la cartella /data e assegnamo i permessi a flcuser.
-# Quando Docker monterà il volume, erediterà questi permessi.
-RUN mkdir -p /data && chown -R flcuser:flcuser /data
-
-# Permessi App
-RUN chown -R flcuser:flcuser /app
-
-USER flcuser
-
-# Ottimizzazioni Python
-ENV PYTHONDONTWRITEBYTECODE=1 \
+ENV PATH="/app/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
-
+RUN groupadd -r flcuser && useradd -r -g flcuser flcuser \
+    && mkdir -p /data && chown flcuser:flcuser /data
+COPY --from=builder /app/venv /app/venv
+COPY src ./src
+COPY --from=frontend-builder /app/src/static/css/styles.css ./src/static/css/styles.css
+USER flcuser
 EXPOSE 8000
 
 # Traefik only routes to healthy containers: probe every second while starting, so a
